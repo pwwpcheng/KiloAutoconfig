@@ -1,0 +1,10 @@
+# Openstack Controller
+166.111.143.220 controller
+
+# Openstack Network Node
+166.111.143.221 network
+
+# Openstack Compute Node
+166.111.143.221 compute221
+166.111.143.222 compute222
+166.111.143.242 compute242

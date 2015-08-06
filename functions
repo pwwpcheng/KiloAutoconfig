@@ -1,0 +1,691 @@
+#!/bin/bash
+#Print out errors to screen
+print_error()
+{
+	echo "[ERROR] Error message: $@"
+	exit 1
+}
+
+# Print out calls and current settings
+print_info()
+{
+	echo "[INFO]  $@"
+	return 0
+}
+
+# Import environmental variables
+set_env()
+{
+	[ -f export.env ] || print_error "export.env not found"
+	source export.env
+	return 0
+}
+
+# Configure name resolution in /etc/hosts
+set_hosts()
+{
+	[ -z "${NETWORK_MANAGEMENT_INTERFACE_IP}" ] && print_error "NETWORK_MANAGEMENT_INTERFACE_IP hasn't been set"
+	[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set"
+	
+	cp /etc/hosts /etc/hosts.bkp
+	cat << EOF >> /etc/hosts
+# Network
+${NETWORK_MANAGEMENT_INTERFACE_IP}
+
+# Controller
+${CONTROLLER_MANAGEMENT_INTERFACE_IP}
+EOF
+	return 0
+}
+
+# Setup NTP
+inst_ntp()
+{
+	apt-get install ntp
+	mv /etc/ntp.conf /etc/ntp.conf.old
+	cat << EOF >> /etc/ntp.conf
+server ntp.ubuntu.com
+server 192.168.22.100
+fudge 192.168.22.100 stratum 10
+EOF
+	service ntp restart
+	[ -z '/var/lib/ntp/ntp.conf.dhcp'] && rm /var/lib/ntp/ntp.conf.dhcp
+	return 0
+}
+
+# Setup OpenStack Packages
+inst_openstack()
+{
+	apt-get install ubuntu-cloud-keyring
+	echo "deb http://ubuntu-cloud.archive.canonical.com/ubuntu" "trusty-updates/kilo main" > /etc/apt/sources.list.d/cloudarchive-kilo.list
+	apt-get update && apt-get dist-upgrade
+	return 0
+}
+
+# SQL Database installation
+inst_sql()
+{
+	apt-get install mariadb-server python-mysqldb
+	
+	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set."
+	[ -f /etc/mysql/conf.d/mysqld_openstack.cnf ] && mv /etc/mysql/conf.d/mysqld_openstack.cnf /etc/mysql/conf.d/mysqld_openstack.cnf.old
+	cat << EOF >> /etc/mysql/conf.d/mysqld_openstack.cnf
+[mysqld]
+bind-address = ${CONTROLLER_MANAGEMENT_INTERFACE_IP}
+
+[mysqld]
+default-storage-engine = innodb
+innodb_file_per_table
+collation-server = utf8_general_ci
+init-connect = 'SET NAMES utf8'
+character-set-server = utf8
+EOF
+	service mysql restart
+
+	mysql_secure_installation << EOF
+Y
+${MYSQL_ROOT_PASS}
+${MYSQL_ROOT_PASS}
+Y
+Y
+Y
+Y
+EOF
+
+	return 0
+}
+
+# Install Message Queue(RabbitMQ)
+inst_msgq()
+{
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
+	
+	apt-get install rabbitmq-server
+	rabbitmqctl add_user openstack ${RABBIT_PASS}
+	rabbitmqctl set_permissions openstack ".*" ".*" ".*"
+	return 0
+}
+
+# Configure Identity Service
+add_identity_service()
+{
+	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set."
+	[ -z "${KEYSTONE_DBPASS}" ] && print_error "KEYSTONE_DBPASS hasn't been set."
+	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set."
+	
+	[ -f /etc/init/keystone.override ] && mv /etc/init/keystone.override /etc/init/keystone.override.old
+
+
+	# --- Install and configure ---
+	mysql -uroot -p$MYSQL_ROOT_PASS <<EOF
+CREATE DATABASE keystone;
+GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY '${KEYSTONE_DBPASS}';
+GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY '${KEYSTONE_DBPASS}';
+exit
+EOF
+	export ADMIN_TOKEN="$(openssl rand -hex 10)"
+	echo "manual" > /etc/init/keystone.override
+	apt-get install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
+#	sed -i '/admin_token = / c\admin_token = '${ADMIN_TOKEN} /etc/keystone/keystone.conf
+#	sed -i '/connection = / c\connection = mysql:\/\/keystone:'${KEYSTONE_DBPASS}'@controller\/keystone'
+#	sed -i '/\[memcache\]/,/^\[/ s/servers =.*/servers = localhost:11211/' /etc/keystone/keystone.conf
+	mv /etc/keystone/keystone.conf /etc/keystone/keystone.conf.old
+	cp Config/controller/keystone.conf /etc/keystone/keystone.conf
+	sed -i 's/${KEYSTONE_DBPASS}/'${KEYSTONE_DBPASS}'/g' /etc/keystone/keystone.conf
+	sed -i 's/${ADMIN_TOKEN}/'${ADMIN_TOKEN}'/g' /etc/keystone/keystone.conf
+	su -s /bin/sh -c "keystone-manage db_sync" keystone
+	
+	# --- Configure the Apache HTTP server ---
+	sed -i '/ServerName/ c\ServerName controller' /etc/apache2/apache2.conf
+	cat << EOF >> /etc/apache2/sites-available/wsgi-keystone.conf
+Listen 5000
+Listen 35357
+<VirtualHost *:5000>
+		WSGIDaemonProcess keystone-public processes=5 threads=1 user=keystone display-name=%{GROUP}
+		WSGIProcessGroup keystone-public
+		WSGIScriptAlias / /var/www/cgi-bin/keystone/main
+		WSGIApplicationGroup %{GLOBAL}
+		WSGIPassAuthorization On
+		<IfVersion >= 2.4>
+				ErrorLogFormat "%{cu}t %M"
+		</IfVersion>
+		LogLevel info
+		ErrorLog /var/log/apache2/keystone-error.log
+		CustomLog /var/log/apache2/keystone-access.log combined
+</VirtualHost>
+<VirtualHost *:35357>
+		WSGIDaemonProcess keystone-admin processes=5 threads=1 user=keystone display-name=%{GROUP}
+		WSGIProcessGroup keystone-admin
+		WSGIScriptAlias / /var/www/cgi-bin/keystone/admin
+		WSGIApplicationGroup %{GLOBAL}
+		WSGIPassAuthorization On
+		<IfVersion >= 2.4>
+				ErrorLogFormat "%{cu}t %M"
+		</IfVersion>
+		LogLevel info
+		ErrorLog /var/log/apache2/keystone-error.log
+		CustomLog /var/log/apache2/keystone-access.log combined
+</VirtualHost>
+EOF
+	ln -s /etc/apache2/sites-available/wsgi-keystone.conf /etc/apache2/sites-enabled
+	mkdir -p /var/www/cgi-bin/keystone
+	curl http://git.openstack.org/cgit/openstack/keystone/plain/httpd/keystone.py?h=stable/kilo \
+	  | tee /var/www/cgi-bin/keystone/main /var/www/cgi-bin/keystone/admin
+	chown -R keystone:keystone /var/www/cgi-bin/keystone
+	chmod 755 /var/www/cgi-bin/keystone/*
+	
+	# --- Finalize installation ---
+	service apache2 restart
+	rm -f /var/lib/keystone/keystone.db
+	
+	# --- Create the service entity and API endpoint ---
+	export OS_TOKEN=${ADMIN_TOKEN}
+	export OS_URL=http://controller:35357/v2.0
+	openstack service create --name keystone --description "OpenStack Identity" identity
+
+	openstack endpoint create \
+	--publicurl http://controller:5000/v2.0 \
+	--internalurl http://controller:5000/v2.0 \
+	--adminurl http://controller:35357/v2.0 \
+	--region RegionOne \
+	identity
+	
+	# --- Create projects, users, and roles ---
+	openstack project create --description "Admin Project" admin
+	openstack user create --password ${ADMIN_PASS} admin
+	openstack role create admin
+	openstack role add --project admin --user admin admin
+	openstack project create --description "Service Project" service
+	openstack project create --description "Demo Project" demo
+	
+	if [ -z "${DEMO_PASS}" ];
+	then
+		read -p "You didn't set DEMO_PASS. Skip creating demo user? [Y/N]: " YN
+		if [ "${YN}" == "n" ] || [ "${YN}" == "N" ];
+		then
+			read -p "Demo_pass = " DEMO_PASS
+		fi
+	fi
+	
+	if ! [ -z "${DEMO_PASS}" ];
+	then
+		openstack user create --password ${DEMO_PASS} demo
+		(password: cloud)
+		openstack role create user
+		openstack role add --project demo --user demo user
+	fi
+	
+	return 0
+}
+
+# Create OpenStack client environment scripts
+create_env_scripts()
+{
+	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set."
+
+	cat << EOF >> admin-openrc.sh
+export OS_PROJECT_DOMAIN_ID=default
+export OS_USER_DOMAIN_ID=default
+export OS_PROJECT_NAME=admin
+export OS_TENANT_NAME=admin
+export OS_USERNAME=admin
+export OS_PASSWORD=${ADMIN_PASS}
+export OS_AUTH_URL=http://controller:35357/v3
+EOF
+
+	if [ -z "${DEMO_PASS}" ];
+	then
+		read -p "You didn't set DEMO_PASS. Skip creating demo user? [Y/N]: " YN
+		if [ "${YN}" == "n" ] || [ "${YN}" == "N" ];
+		then
+			read -p "DEMO_PASS = " DEMO_PASS
+		fi
+	fi
+	
+	if ! [ -z "${DEMO_PASS}" ] 
+	then
+		cat << EOF >> demo-openrc.sh
+export OS_PROJECT_DOMAIN_ID=default
+export OS_USER_DOMAIN_ID=default
+export OS_PROJECT_NAME=demo
+export OS_TENANT_NAME=demo
+export OS_USERNAME=demo
+export OS_PASSWORD=${DEMO_PASS}
+export OS_AUTH_URL=http://controller:5000/v3
+EOF
+	fi
+	
+	return 0
+}
+
+# Add the Image service
+add_image_service()
+{
+	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set."
+	[ -z "${GLANCE_PASS}" ] && print_error "GLANCE_PASS hasn't been set."
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
+	
+	mysql -uroot -p${MYSQL_ROOT_PASS} << EOF
+CREATE DATABASE glance;
+GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'localhost' IDENTIFIED BY '${GLANCE_PASS}';
+GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'%' IDENTIFIED BY '${GLANCE_PASS}';
+exit
+EOF
+	
+	source admin-openrc.sh
+	# --- Create glance user and glance project ---
+	openstack user create --password ${GLANCE_PASS} glance
+	openstack role add --project service --user glance admin
+	openstack service create --name glance --description "OpenStack Image service" image
+	openstack endpoint create \
+	--publicurl http://controller:9292 \
+	--internalurl http://controller:9292 \
+	--adminurl http://controller:9292 \
+	--region RegionOne \
+	image
+	
+	# --- Install and configure the Image service components ---
+	apt-get install glance python-glanceclient
+	[ -f /etc/glance/glance-api.conf ] && mv /etc/glance/glance-api.conf /etc/glance/glance-api.conf.old
+	cp Config/controller/glance-api.conf /etc/glance/glance-api.conf
+	sed -i 's/${GLANCE_PASS}/'${GLANCE_PASS}'/g' /etc/glance/glance-api.conf
+	sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/glance/glance-api.conf
+	
+	[ -f /etc/glance/glance-registry.conf ] && mv /etc/glance/glance-registry.conf /etc/glance/glance-registry.conf.old
+	cp Config/controller/glance-registry.conf /etc/glance/glance-registry.conf
+	sed -i 's/${GLANCE_PASS}/'${GLANCE_PASS}'/g' /etc/glance/glance-registry.conf
+	sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/glance/glance-registry.conf
+	
+	su -s /bin/sh -c "glance-manage db_sync" glance
+	
+	# --- Finalize installation ---
+	service glance-registry restart
+	service glance-api restart
+	rm -f /var/lib/glance/glance.sqlite
+	
+	return 0
+}
+
+# Add the Compute service
+add_compute()
+{
+	[ -z "${INSTALL_TYPE}" ] && print_error "INSTALL_TYPE hasn't been set." 
+	[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set."
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
+	[ -z "${THIS_MANAGEMENT_INTERFACE_IP}" ] && print_error "THIS_MANAGEMENT_INTERFACE_IP hasn't been set."
+	
+
+	# --- Configurations for Controller Node ---
+	if [ "${INSTALL_TYPE}" == "Controller" ]; then
+		# --- Configure prerequisites ---
+		mysql -uroot -p${MYSQL_ROOT_PASS} << EOF
+CREATE DATABASE nova;
+GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY '${NOVA_PASS}';
+GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY '${NOVA_PASS}';
+(NOVA_DBPASS = cloud)
+exit
+EOF
+		source admin-openrc.sh
+		openstack user create --password ${NOVA_PASS} nova
+		openstack role add --project service --user nova admin
+		openstack service create --name nova \
+		--description "OpenStack Compute" compute
+		openstack endpoint create \
+		--publicurl http://controller:8774/v2/%\(tenant_id\)s \
+		--internalurl http://controller:8774/v2/%\(tenant_id\)s \
+		--adminurl http://controller:8774/v2/%\(tenant_id\)s \
+		--region RegionOne \
+		compute
+		
+		# --- Install and configure Compute controller components ---
+		apt-get install nova-api nova-cert nova-conductor nova-consoleauth nova-novncproxy nova-scheduler python-novaclient
+		
+		[ -f /etc/nova/nova.conf ] && mv /etc/nova/nova.conf /etc/nova/nova.conf.old
+		cp Config/controller/nova.conf /etc/nova/nova.conf
+		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${THIS_MANAGEMENT_INTERFACE_IP}'/g' /etc/nova/nova.conf
+		sed -i 's/${NOVA_PASS}/'${NOVA_PASS}'/g' /etc/nova/nova.conf
+		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/nova/nova.conf
+		
+		su -s /bin/sh -c "nova-manage db sync" nova
+		
+		# --- Finalize Nova setup ---
+		service nova-api restart
+		service nova-cert restart
+		service nova-consoleauth restart
+		service nova-scheduler restart
+		service nova-conductor restart
+		service nova-novncproxy restart
+		
+		rm -f /var/lib/nova/nova.sqlite
+	fi
+	
+	# --- Configurations for Compute Node ---
+	if [ "${INSTALL_TYPE}" == "Compute" ]; then
+	
+		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set."
+	
+		# --- Install and configure the Compute hypervisor components ---
+		apt-get install nova-compute sysfsutils
+		
+		[ -f /etc/nova/nova.conf ] && mv /etc/nova/nova.conf /etc/nova/nova.conf.old
+		cp Config/compute/nova.conf /etc/nova/nova.conf
+		sed -i 's/${THIS_MANAGEMENT_INTERFACE_IP}/'${THIS_MANAGEMENT_INTERFACE_IP}'/g' /etc/nova/nova.conf
+		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}'/g' /etc/nova/nova.conf
+		sed -i 's/${NOVA_PASS}/'${NOVA_PASS}'/g' /etc/nova/nova.conf
+		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/nova/nova.conf
+
+		# --- Finalize installation ---
+		export HARDWARE_ACCELERATION="$(egrep -c '(vmx|svm)' /proc/cpuinfo)"
+		if [ -z "${HARDWARE_ACCELERATION}" ] || [ "${HARDWARE_ACCELERATION}" == "0" ]; then
+			[ -f /etc/nova/nova-compute.conf ] && mv /etc/nova/nova-compute.conf /etc/nova/nova-compute.conf.old
+			cat  >> /etc/nova/nova-compute.conf << EOF
+[DEFAULT]
+compute_driver=libvirt.LibvirtDriver
+[libvirt]
+virt_type=qemu
+EOF
+		fi
+		service nova-compute restart
+		rm -f /var/lib/nova/nova.sqlite
+	fi
+	
+	return 0
+}
+
+# Add networking components
+add_networking()
+{
+	[ -z "${NEUTRON_PASS}" ] && print_error "NEUTRON_PASS hasn't been set."
+	[ -z "${META_SECRET}" ] && print_error "META_SECRET hasn't been set."
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
+	
+	# --- Configure controller node ---
+	if [ "${INSTALL_TYPE}" == "Controller" ]; then
+
+		[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set."
+
+		# --- Configure prerequisites ---
+		mysql -uroot -p${MYSQL_ROOT_PASS} << EOF
+CREATE DATABASE neutron;
+GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY '${NEUTRON_PASS}';
+GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'%' IDENTIFIED BY '${NEUTRON_PASS}';
+exit
+EOF
+		source admin-openrc.sh
+		openstack user create --password ${NEUTRON_PASS} neutron
+		openstack role add --project service --user neutron admin
+		openstack service create --name neutron \
+		--description "OpenStack Networking" network
+		openstack endpoint create \
+		--publicurl http://controller:9696 \
+		--adminurl http://controller:9696 \
+		--internalurl http://controller:9696 \
+		--region RegionOne \
+		network
+		
+		# --- Install the Networking components ---
+		apt-get install neutron-server neutron-plugin-ml2 python-neutronclient
+		
+		# --- Configure the Networking server component ---
+		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
+		cp Config/controller/neutron.conf /etc/neutron/neutron.conf
+#		sed -i 's/${THIS_MANAGEMENT_INTERFACE_IP}/'${THIS_MANAGEMENT_INTERFACE_IP}'/g' /etc/neutron/neutron.conf
+#		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}'/g' /etc/neutron/neutron.conf
+		sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/neutron.conf
+		sed -i 's/${NOVA_PASS}/'${NOVA_PASS}'/g' /etc/neutron/neutron.conf
+		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/neutron/neutron.conf
+	sed -i 's/${META_SECRET}/'${META_SECRET}'/g' /etc/neutron/neutron.conf
+		
+		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
+		cp Config/controller/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
+	
+		
+		if [ -f /etc/nova/nova.conf ]; then
+			sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/nova/nova.conf
+		else
+			print_error "/etc/nova/nova.conf not found."
+		fi
+		
+		su -s /bin/sh -c "neutron-db-manage --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugins/ml2/ml2_conf.ini upgrade head" neutron
+		
+		# --- Finalize installation ---
+		service nova-api restart
+		service neutron-server restart
+	fi
+	
+	# --- Configure Network Node ---
+	if [ "${INSTALL_TYPE}" == "Network" ]; then
+		
+	# --- Configure prerequisites ---
+		if [ -f /etc/sysctl.conf ]; then
+			sed -i '/net.ipv4.ip_forward=/ c\net.ipv4.ip_forward=1' /etc/sysctl.conf
+		sed -i '/net.ipv4.conf.all.rp_filter=/ c\net.ipv4.conf.all.rp_filter=0' /etc/sysctl.conf
+		sed -i '/net.ipv4.conf.default.rp_filter=/ c\net.ipv4.conf.default.rp_filter=0' /etc/sysctl.conf
+	else
+		print_error "/etc/sysctl.conf not found"
+	fi
+	
+	sysctl -p
+	
+	# --- Install and configure the Networking components
+	apt-get install neutron-plugin-ml2 neutron-plugin-openvswitch-agent neutron-l3-agent neutron-dhcp-agent neutron-metadata-agent
+	
+	[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
+		cp Config/network/neutron.conf /etc/neutron/neutron.conf
+		sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/neutron.conf
+		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/neutron/neutron.conf
+	
+	[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
+		cp Config/network/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
+	sed -i 's/${THIS_TUNNEL_INTERFACE_IP}'${THIS_TUNNEL_INTERFACE_IP}'/g' /etc/neutron/plugins/ml2/ml2_conf.ini
+	
+	[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
+		cp Config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
+	
+	[ -f /etc/neutron/dnsmasq-neutron.conf ] && mv /etc/neutron/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf.old
+		cp Config/network/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf
+	
+	pkill dnsmasq
+	
+	# --- Configure the metadata agent ---
+	[ -f /etc/neutron/metadata_agent.ini ] && mv /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini.old
+		cp Config/network/metadata_agent.ini /etc/neutron/metadata_agent.ini
+	sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/metadata_agent.ini
+	sed -i 's/${META_SECRET}/'${META_SECRET}'/g' /etc/neutron/metadata_agent.ini
+	
+	service nova-api restart
+	
+	# --- Configure the Open vSwitch (OVS) service ---
+	service openvswitch-switch restart
+	ovs-vsctl add-br br-ex
+	ovs-vsctl add-port br-ex ${EXTERNAL_INTERFACE}
+	
+	service neutron-plugin-openvswitch-agent restart
+	service neutron-l3-agent restart
+	service neutron-dhcp-agent restart
+	service neutron-metadata-agent restart
+	
+	fi
+	
+	if [ "$INSTALL_TYPE" == "Compute" ]; then
+		[ -f /etc/sysctl.conf ] && mv /etc/sysctl.conf /etc/sysctl.conf.old
+		cp Config/compute/sysctl.conf /etc/sysctl.conf
+		sysctl -p
+		
+		# --- Install and configure networking components ---
+		apt-get install neutron-plugin-ml2 neutron-plugin-openvswitch-agent
+		
+		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
+		cp Config/compute/neutron.conf /etc/neutron/neutron.conf
+		sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/neutron.conf
+		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/neutron/neutron.conf
+		
+		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
+		cp Config/compute/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
+		sed -i 's/${THIS_TUNNEL_INTERFACE_IP}'${THIS_TUNNEL_INTERFACE_IP}'/g' /etc/neutron/plugins/ml2/ml2_conf.ini
+		
+		service openvswitch-switch restart
+		
+		if [ -f /etc/nova/nova.conf ]; then
+			sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/nova/nova.conf
+		else
+			print_error "/etc/nova/nova.conf is missing."
+			return 1
+		fi
+		
+		# --- Finalize installation ---
+		service nova-compute restart
+		service neutron-plugin-openvswitch-agent restart
+	fi
+	
+	return 0
+}
+
+# Create initial network for OpenStack Network (Neutron)
+create_init_network()
+{
+	! [ -f admin-openrc.sh ] && print_error "admin-openrc.sh's missing." && return 1
+
+	source admin-openrc.sh
+	
+	# --- Create external network ---
+	neutron net-create ext-net --router:external \
+	--provider:physical_network external --provider:network_type flat
+	
+	read -p "EXTERNAL_NETWORK_CIDR = (e.g. 203.0.113.0/24) " EXTERNAL_NETWORK_CIDR
+	read -p "FLOATING_IP_START = (e.g. 203.0.113.101) " FLOATING_IP_START
+	read -p "FLOATING_IP_END = (e.g. 203.0.113.200) " FLOATING_IP_END
+	read -p "EXTERNAL_NETWORK_GATEWAY = (e.g. 203.0.113.1) " EXTERNAL_NETWORK_GATEWAY
+	
+	neutron subnet-create ext-net ${EXTERNAL_NETWORK_CIDR} --name ext-subnet \
+	--allocation-pool start=${FLOATING_IP_START},end=${FLOATING_IP_END} \
+	--disable-dhcp --gateway ${EXTERNAL_NETWORK_GATEWAY}
+	
+	# --- Create tenant network ---
+	if [ -f demo-openrc.sh ]; then 
+		print_info "Using demo-openrc.sh to create demo-net"
+		source demo-openrc.sh 
+	else 
+		print_info "Using admin-openrc.sh to create demo-net"
+	fi
+	
+	neutron net-create demo-net
+	
+	read -p "TENANT_NETWORK_CIDR = (e.g. 192.168.1.0/24) " TENANT_NETWORK_CIDR
+	read -p "TENANT_NETWORK_GATEWAY = (e.g. 192.168.1.1) " TENANT_NETWORK_GATEWAY
+
+	neutron subnet-create demo-net TENANT_NETWORK_CIDR --name demo-subnet --gateway TENANT_NETWORK_GATEWAY
+	
+	# --- create a router on the tenant network and attach the external and tenant networks to it ---
+	neutron router-create demo-router
+	neutron router-interface-add demo-router demo-subnet
+	neutron router-gateway-set demo-router ext-net
+	
+	return 0
+}
+
+# Add OpenStack Dashboard
+add_dashboard()
+{
+	apt-get install openstack-dashboard
+	if [ -f /etc/openstack-dashboard/local_settings.py ]; then
+		mv /etc/openstack-dashboard/local_settings.py /etc/openstack-dashboard/local_settings.py.old
+		cp Config/Controller/local_settings.py /etc/openstack-dashboard/local_settings.py
+	else
+		print_error "OpenStack Dashboard setup failed."
+	fi
+	
+	service apache2 reload
+	
+	return 0
+}
+
+# Add OpenStack Telemetry Service (Ceilometer)
+add_ceilometer()
+{
+	[ -z "${INSTALL_TYPE}" ] && print_error "Please define INSTALL_TYPE " 
+	if [ "${INSTALL_TYPE}" == "Controller" ]; then 
+		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set."
+		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." 
+		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." 
+		
+		# --- Configure prerequisites ---
+		apt-get install mongodb-server mongodb-clients python-pymongo
+		
+		[ -f /etc/mongodb.conf ] && mv /etc/mongodb.conf /etc/mongodb.conf.old
+		cp Config/controller/mongodb.conf /etc/mongodb.conf
+		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}'/g' /etc/mongodb.conf
+		service mongodb stop
+		rm /var/lib/mongodb/journal/prealloc.*
+		service mongodb start
+		service mongodb restart
+		
+		mongo --host controller --eval '
+		db = db.getSiblingDB("ceilometer");
+		db.addUser({user: "ceilometer",
+		pwd: "${CEILOMETER_PASS}",
+		roles: [ "readWrite", "dbAdmin" ]})'
+		
+		source admin-openrc.sh
+		openstack user create --password ${CEILOMETER_PASS} ceilometer
+		openstack role add --project service --user ceilometer admin
+		openstack service create --name ceilometer --description "Telemetry" metering
+		openstack endpoint create \
+		--publicurl http://controller:8777 \
+		--internalurl http://controller:8777 \
+		--adminurl http://controller:8777 \
+		--region RegionOne \
+		metering
+		
+		# --- Install and configure the Telemetry module components ---
+		apt-get install ceilometer-api ceilometer-collector ceilometer-agent-central ceilometer-agent-notification ceilometer-alarm-evaluator ceilometer-alarm-notifier python-ceilometerclient
+		
+		export TELEMETRY_SECRET="$(openssl rand -hex 10)"
+		
+		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
+		cp Config/controller/ceilometer.conf /etc/ceilometer/ceilometer.conf
+		sed -i 's/${CEILOMETER_PASS}/'${CEILOMETER_PASS}'/g' /etc/ceilometer/ceilometer.conf
+		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/ceilometer/ceilometer.conf
+		sed -i 's/${TELEMETRY_SECRET}/'${TELEMETRY_SECRET}'/g' /etc/ceilometer/ceilometer.conf
+
+		service ceilometer-agent-central restart
+		service ceilometer-agent-notification restart
+		service ceilometer-api restart
+		service ceilometer-collector restart
+		service ceilometer-alarm-evaluator restart
+		service ceilometer-alarm-notifier restart
+	fi
+	
+	if [ "${INSTALL_TYPE}" == "Compute" ]; then 
+		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." 
+		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." 
+	
+		if [ -z "$TELEMETRY_SECRET" ]; then
+			echo "Telemetry_secret not defined. You may lookup /etc/ceilometer/ceilometer.conf or define a new one."
+			read -p "Define now? [Y/N] : " YN
+			if [ "$YN" == "y" ] || [ "$YN" == "Y" ]; then
+				read -p "1 - Create a new secret | 2 - Enter an existing secret [1/2]: " CHOICE
+				if [ "${CHOICE}" == "1" ]; then
+					export TELEMETRY_SECRET="$(openssl rand -hex 10)"
+					echo "New TELEMETRY_SECRET is "${TELEMETRY_SECRET}
+				else 
+					read -p "TELEMETRY_SECRET = " TELEMETRY_SECRET
+				fi
+			else
+				echo "TELEMETRY_SECRET set cancelled. Be sure to set it later."
+			fi
+		fi
+		
+		apt-get install ceilometer-agent-compute
+		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
+		cp Config/compute/ceilometer.conf /etc/ceilometer/ceilometer.conf
+		sed -i 's/${CEILOMETER_PASS}/'${CEILOMETER_PASS}'/g' /etc/ceilometer/ceilometer.conf
+		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/ceilometer/ceilometer.conf
+		sed -i 's/${TELEMETRY_SECRET}/'${TELEMETRY_SECRET}'/g' /etc/ceilometer/ceilometer.conf
+		
+		service ceilometer-agent-compute restart
+		service nova-compute restart
+	fi
+		
+	return 0
+}	
