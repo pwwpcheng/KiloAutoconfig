@@ -10,6 +10,7 @@ source ${PWD}/export.env
 . ${PWD}/functions
 
 # Setup OpenStack Packages
+set_hosts
 inst_openstack
 set_ntp
 

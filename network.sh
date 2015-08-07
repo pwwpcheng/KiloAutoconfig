@@ -9,7 +9,8 @@ export INSTALL_TYPE=Network
 . ${PWD}/functions
 
 # Import environment variables
-set_env()
+set_env
+set_hosts
 
 # Setup OpenStack Packages
 set_hosts
@@ -20,3 +21,4 @@ inst_openstack
 add_networking
 
 # Create a initial network
+

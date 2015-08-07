@@ -9,7 +9,8 @@ export INSTALL_TYPE=Controller
 . ${PWD}/functions
 
 # Import environment variables
-set_env()
+set_env
+set_hosts
 
 # Setup OpenStack Packages
 set_hosts
