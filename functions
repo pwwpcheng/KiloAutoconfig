@@ -2,9 +2,27 @@
 #Print out errors to screen
 print_error()
 {
-	echo "[ERROR] Error message: $@"
-	exit 1
+	echo "[ERROR] Error message: $1"
+	if [ "$2" == "VAR_UNDEFINED" ]; then
+		set_variant $3
+		return 0
+	else
+		exit 1;
+	fi
 }
+
+# 
+set_variant()
+{
+	echo "[INFO ] Now set variant $1."
+	read -p "$1=" VAR
+	export $1=${VAR}
+	echo "[INFO ] Set $1 to ${VAR}"
+	cat << EOF >> export.env
+export $1=${VAR}		\#Auto created from config script.
+EOF
+	return 0
+}	
 
 # Print out calls and current settings
 print_info()
@@ -24,16 +42,16 @@ set_env()
 # Configure name resolution in /etc/hosts
 set_hosts()
 {
-	[ -z "${NETWORK_MANAGEMENT_INTERFACE_IP}" ] && print_error "NETWORK_MANAGEMENT_INTERFACE_IP hasn't been set"
-	[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set"
+	[ -z "${NETWORK_MANAGEMENT_INTERFACE_IP}" ] && print_error "NETWORK_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED  "NETWORK_MANAGEMENT_INTERFACE_IP"
+	[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED  CONTROLLER_MANAGEMENT_INTERFACE_IP
 	
 	cp /etc/hosts /etc/hosts.bkp
 	cat << EOF >> /etc/hosts
 # Network
-${NETWORK_MANAGEMENT_INTERFACE_IP}
+${NETWORK_MANAGEMENT_INTERFACE_IP} network
 
 # Controller
-${CONTROLLER_MANAGEMENT_INTERFACE_IP}
+${CONTROLLER_MANAGEMENT_INTERFACE_IP} controller
 EOF
 	return 0
 }
@@ -66,8 +84,8 @@ inst_openstack()
 inst_sql()
 {
 	apt-get install mariadb-server python-mysqldb
-	
-	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set."
+	###BUG HERE###
+	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS" 
 	[ -f /etc/mysql/conf.d/mysqld_openstack.cnf ] && mv /etc/mysql/conf.d/mysqld_openstack.cnf /etc/mysql/conf.d/mysqld_openstack.cnf.old
 	cat << EOF >> /etc/mysql/conf.d/mysqld_openstack.cnf
 [mysqld]
@@ -98,7 +116,7 @@ EOF
 # Install Message Queue(RabbitMQ)
 inst_msgq()
 {
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS" 
 	
 	apt-get install rabbitmq-server
 	rabbitmqctl add_user openstack ${RABBIT_PASS}
@@ -109,34 +127,35 @@ inst_msgq()
 # Configure Identity Service
 add_identity_service()
 {
-	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set."
-	[ -z "${KEYSTONE_DBPASS}" ] && print_error "KEYSTONE_DBPASS hasn't been set."
-	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set."
+	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS"
+	[ -z "${KEYSTONE_PASS}" ] && print_error "KEYSTONE_PASS hasn't been set." VAR_UNDEFINED "KEYSTONE_PASS"
+	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set." VAR_UNDEFINED "ADMIN_PASS" 
 	
 	[ -f /etc/init/keystone.override ] && mv /etc/init/keystone.override /etc/init/keystone.override.old
 
 
 	# --- Install and configure ---
-	mysql -uroot -p$MYSQL_ROOT_PASS <<EOF
+	mysql -uroot -p${MYSQL_ROOT_PASS} <<EOF
 CREATE DATABASE keystone;
-GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY '${KEYSTONE_DBPASS}';
-GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY '${KEYSTONE_DBPASS}';
+GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY '${KEYSTONE_PASS}';
+GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY '${KEYSTONE_PASS}';
 exit
 EOF
 	export ADMIN_TOKEN="$(openssl rand -hex 10)"
 	echo "manual" > /etc/init/keystone.override
 	apt-get install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
 #	sed -i '/admin_token = / c\admin_token = '${ADMIN_TOKEN} /etc/keystone/keystone.conf
-#	sed -i '/connection = / c\connection = mysql:\/\/keystone:'${KEYSTONE_DBPASS}'@controller\/keystone'
+#	sed -i '/connection = / c\connection = mysql:\/\/keystone:'${KEYSTONE_PASS}'@controller\/keystone'
 #	sed -i '/\[memcache\]/,/^\[/ s/servers =.*/servers = localhost:11211/' /etc/keystone/keystone.conf
 	mv /etc/keystone/keystone.conf /etc/keystone/keystone.conf.old
 	cp Config/controller/keystone.conf /etc/keystone/keystone.conf
-	sed -i 's/${KEYSTONE_DBPASS}/'${KEYSTONE_DBPASS}'/g' /etc/keystone/keystone.conf
+	sed -i 's/${KEYSTONE_PASS}/'${KEYSTONE_PASS}'/g' /etc/keystone/keystone.conf
 	sed -i 's/${ADMIN_TOKEN}/'${ADMIN_TOKEN}'/g' /etc/keystone/keystone.conf
 	su -s /bin/sh -c "keystone-manage db_sync" keystone
 	
 	# --- Configure the Apache HTTP server ---
-	sed -i '/ServerName/ c\ServerName controller' /etc/apache2/apache2.conf
+	sed -i '/#ServerRoot \"\/etc\/apache2\"/ c\#ServerRoot \"\/etc\/apache2\"\nServerName controller' /etc/apache2/apache2.conf
+	[ -f /etc/apache2/sites-available/wsgi-keystone.conf ] && mv /etc/apache2/sites-available/wsgi-keystone.conf /etc/apache2/sites-available/wsgi-keystone.conf.old
 	cat << EOF >> /etc/apache2/sites-available/wsgi-keystone.conf
 Listen 5000
 Listen 35357
@@ -210,7 +229,6 @@ EOF
 	if ! [ -z "${DEMO_PASS}" ];
 	then
 		openstack user create --password ${DEMO_PASS} demo
-		(password: cloud)
 		openstack role create user
 		openstack role add --project demo --user demo user
 	fi
@@ -221,7 +239,7 @@ EOF
 # Create OpenStack client environment scripts
 create_env_scripts()
 {
-	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set."
+	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set." VAR_UNDEFINED "ADMIN_PASS"
 
 	cat << EOF >> admin-openrc.sh
 export OS_PROJECT_DOMAIN_ID=default
@@ -261,9 +279,9 @@ EOF
 # Add the Image service
 add_image_service()
 {
-	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set."
-	[ -z "${GLANCE_PASS}" ] && print_error "GLANCE_PASS hasn't been set."
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
+	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS"
+	[ -z "${GLANCE_PASS}" ] && print_error "GLANCE_PASS hasn't been set." VAR_UNDEFINED "GLANCE_PASS"
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
 	
 	mysql -uroot -p${MYSQL_ROOT_PASS} << EOF
 CREATE DATABASE glance;
@@ -309,10 +327,10 @@ EOF
 # Add the Compute service
 add_compute()
 {
-	[ -z "${INSTALL_TYPE}" ] && print_error "INSTALL_TYPE hasn't been set." 
-	[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set."
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
-	[ -z "${THIS_MANAGEMENT_INTERFACE_IP}" ] && print_error "THIS_MANAGEMENT_INTERFACE_IP hasn't been set."
+	[ -z "${INSTALL_TYPE}" ] && print_error "INSTALL_TYPE hasn't been set." VAR_UNDEFINED "INSTALL_TYPE"
+	[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set." VAR_UNDEFINED "NOVA_PASS" 
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
+	[ -z "${THIS_MANAGEMENT_INTERFACE_IP}" ] && print_error "THIS_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "THIS_MANAGEMENT_INTERFACE_IP"
 	
 
 	# --- Configurations for Controller Node ---
@@ -322,7 +340,6 @@ add_compute()
 CREATE DATABASE nova;
 GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY '${NOVA_PASS}';
 GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY '${NOVA_PASS}';
-(NOVA_DBPASS = cloud)
 exit
 EOF
 		source admin-openrc.sh
@@ -362,7 +379,7 @@ EOF
 	# --- Configurations for Compute Node ---
 	if [ "${INSTALL_TYPE}" == "Compute" ]; then
 	
-		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set."
+		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "CONTROLLER_MANAGEMENT_INTERFACE_IP"
 	
 		# --- Install and configure the Compute hypervisor components ---
 		apt-get install nova-compute sysfsutils
@@ -395,14 +412,14 @@ EOF
 # Add networking components
 add_networking()
 {
-	[ -z "${NEUTRON_PASS}" ] && print_error "NEUTRON_PASS hasn't been set."
-	[ -z "${META_SECRET}" ] && print_error "META_SECRET hasn't been set."
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set."
+	[ -z "${NEUTRON_PASS}" ] && print_error "NEUTRON_PASS hasn't been set." VAR_UNDEFINED "NEUTRON_PASS"
+	[ -z "${META_SECRET}" ] && print_error "META_SECRET hasn't been set." VAR_UNDEFINED "META_SECRET" 
+	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
 	
 	# --- Configure controller node ---
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then
 
-		[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set."
+		[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set." VAR_UNDEFINED "NOVA_PASS"
 
 		# --- Configure prerequisites ---
 		mysql -uroot -p${MYSQL_ROOT_PASS} << EOF
@@ -605,9 +622,9 @@ add_ceilometer()
 {
 	[ -z "${INSTALL_TYPE}" ] && print_error "Please define INSTALL_TYPE " 
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then 
-		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set."
-		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." 
-		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." 
+		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "CONTROLLER_MANAGEMENT_INTERFACE_IP"
+		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." VAR_UNDEFINED "CEILOMETER_PASS"
+		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
 		
 		# --- Configure prerequisites ---
 		apt-get install mongodb-server mongodb-clients python-pymongo
@@ -657,8 +674,8 @@ add_ceilometer()
 	fi
 	
 	if [ "${INSTALL_TYPE}" == "Compute" ]; then 
-		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." 
-		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." 
+		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." VAR_UNDEFINED "CEILOMETER_PASS"
+		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
 	
 		if [ -z "$TELEMETRY_SECRET" ]; then
 			echo "Telemetry_secret not defined. You may lookup /etc/ceilometer/ceilometer.conf or define a new one."
