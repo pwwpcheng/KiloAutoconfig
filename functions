@@ -1,4 +1,22 @@
 #!/bin/bash
+
+# This function replaces parameters like ${VAR} to value of ${VAR} in a file.
+# Example: (In rep_file, there's a line as) PASS_1=${PASS_1}
+#	   (Currently, PASS_1="aaa")
+# Usage:   replace_para_in_file rep_file PASS_1
+# After:   (In rep_file, the line changes to) PASS_1=aaa
+replace_para_in_file()
+{
+        set -x
+        CUR_FILE=$1
+        WASTE=""
+        for i in $*; do
+                [ -z ${WASTE} ] && WASTE="a" && continue
+                sed -i 's/\${'$i'}/'${!i}'/g' $CUR_FILE
+        done;
+        return 0;
+}
+
 #Print out errors to screen
 print_error()
 {
@@ -11,7 +29,6 @@ print_error()
 	fi
 }
 
-# 
 set_variant()
 {
 	echo "[INFO ] Now set variant $1."
@@ -59,7 +76,8 @@ EOF
 # Setup NTP
 inst_ntp()
 {
-	apt-get install ntp
+	print_info "Install and configuring NTP."
+	apt-get -y install ntp
 	mv /etc/ntp.conf /etc/ntp.conf.old
 	cat << EOF >> /etc/ntp.conf
 server ntp.ubuntu.com
@@ -74,7 +92,8 @@ EOF
 # Setup OpenStack Packages
 inst_openstack()
 {
-	apt-get install ubuntu-cloud-keyring
+	print_info "Install and configuring OpenStack Packages."
+	apt-get -y install ubuntu-cloud-keyring
 	echo "deb http://ubuntu-cloud.archive.canonical.com/ubuntu" "trusty-updates/kilo main" > /etc/apt/sources.list.d/cloudarchive-kilo.list
 	apt-get update && apt-get dist-upgrade
 	return 0
@@ -83,9 +102,13 @@ inst_openstack()
 # SQL Database installation
 inst_sql()
 {
-	apt-get install mariadb-server python-mysqldb
-	###BUG HERE###
+	print_info "Install and configuring MySQL - MariaDB."
 	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS" 
+	
+	debconf-set-selections <<< 'mariadb-server mysql-server/root_password password ${MYSQL_ROOT_PASS}'
+	debconf-set-selections <<< 'mariadb-server mysql-server/root_password_again password ${MYSQL_ROOT_PASS}'
+	apt-get -y install mariadb-server
+
 	[ -f /etc/mysql/conf.d/mysqld_openstack.cnf ] && mv /etc/mysql/conf.d/mysqld_openstack.cnf /etc/mysql/conf.d/mysqld_openstack.cnf.old
 	cat << EOF >> /etc/mysql/conf.d/mysqld_openstack.cnf
 [mysqld]
@@ -100,10 +123,9 @@ character-set-server = utf8
 EOF
 	service mysql restart
 
-	mysql_secure_installation << EOF
-Y
+        mysql_secure_installation << EOF
 ${MYSQL_ROOT_PASS}
-${MYSQL_ROOT_PASS}
+n
 Y
 Y
 Y
@@ -116,9 +138,10 @@ EOF
 # Install Message Queue(RabbitMQ)
 inst_msgq()
 {
+	print_info "Install and configuring RabbitMQ."
 	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS" 
 	
-	apt-get install rabbitmq-server
+	apt-get -y install rabbitmq-server
 	rabbitmqctl add_user openstack ${RABBIT_PASS}
 	rabbitmqctl set_permissions openstack ".*" ".*" ".*"
 	return 0
@@ -127,6 +150,7 @@ inst_msgq()
 # Configure Identity Service
 add_identity_service()
 {
+	print_info "Install and configuring Identity Service."
 	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS"
 	[ -z "${KEYSTONE_PASS}" ] && print_error "KEYSTONE_PASS hasn't been set." VAR_UNDEFINED "KEYSTONE_PASS"
 	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set." VAR_UNDEFINED "ADMIN_PASS" 
@@ -143,14 +167,13 @@ exit
 EOF
 	export ADMIN_TOKEN="$(openssl rand -hex 10)"
 	echo "manual" > /etc/init/keystone.override
-	apt-get install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
+	apt-get -y install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
 #	sed -i '/admin_token = / c\admin_token = '${ADMIN_TOKEN} /etc/keystone/keystone.conf
 #	sed -i '/connection = / c\connection = mysql:\/\/keystone:'${KEYSTONE_PASS}'@controller\/keystone'
 #	sed -i '/\[memcache\]/,/^\[/ s/servers =.*/servers = localhost:11211/' /etc/keystone/keystone.conf
 	mv /etc/keystone/keystone.conf /etc/keystone/keystone.conf.old
 	cp Config/controller/keystone.conf /etc/keystone/keystone.conf
-	sed -i 's/${KEYSTONE_PASS}/'${KEYSTONE_PASS}'/g' /etc/keystone/keystone.conf
-	sed -i 's/${ADMIN_TOKEN}/'${ADMIN_TOKEN}'/g' /etc/keystone/keystone.conf
+	replace_para_in_file /etc/keystone/keystone.conf KEYSTONE_PASS ADMIN_TOKEN
 	su -s /bin/sh -c "keystone-manage db_sync" keystone
 	
 	# --- Configure the Apache HTTP server ---
@@ -239,6 +262,7 @@ EOF
 # Create OpenStack client environment scripts
 create_env_scripts()
 {
+	print_info "Creating environmental scripts"
 	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set." VAR_UNDEFINED "ADMIN_PASS"
 
 	cat << EOF >> admin-openrc.sh
@@ -279,6 +303,7 @@ EOF
 # Add the Image service
 add_image_service()
 {
+	print_info "Adding OpenStack Image Service."
 	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS"
 	[ -z "${GLANCE_PASS}" ] && print_error "GLANCE_PASS hasn't been set." VAR_UNDEFINED "GLANCE_PASS"
 	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
@@ -303,16 +328,14 @@ EOF
 	image
 	
 	# --- Install and configure the Image service components ---
-	apt-get install glance python-glanceclient
+	apt-get -y install glance python-glanceclient
 	[ -f /etc/glance/glance-api.conf ] && mv /etc/glance/glance-api.conf /etc/glance/glance-api.conf.old
 	cp Config/controller/glance-api.conf /etc/glance/glance-api.conf
-	sed -i 's/${GLANCE_PASS}/'${GLANCE_PASS}'/g' /etc/glance/glance-api.conf
-	sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/glance/glance-api.conf
+	replace_para_in_file /etc/glance/glance-api.conf GLANCE_PASS RABBIT_PASS
 	
 	[ -f /etc/glance/glance-registry.conf ] && mv /etc/glance/glance-registry.conf /etc/glance/glance-registry.conf.old
 	cp Config/controller/glance-registry.conf /etc/glance/glance-registry.conf
-	sed -i 's/${GLANCE_PASS}/'${GLANCE_PASS}'/g' /etc/glance/glance-registry.conf
-	sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/glance/glance-registry.conf
+	replace_para_in_file /etc/glance/glance-registry.conf GLANCE_PASS RABBIT_PASS
 	
 	su -s /bin/sh -c "glance-manage db_sync" glance
 	
@@ -327,6 +350,7 @@ EOF
 # Add the Compute service
 add_compute()
 {
+	print_info "Installing and configurating Compute Service."
 	[ -z "${INSTALL_TYPE}" ] && print_error "INSTALL_TYPE hasn't been set." VAR_UNDEFINED "INSTALL_TYPE"
 	[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set." VAR_UNDEFINED "NOVA_PASS" 
 	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
@@ -355,13 +379,11 @@ EOF
 		compute
 		
 		# --- Install and configure Compute controller components ---
-		apt-get install nova-api nova-cert nova-conductor nova-consoleauth nova-novncproxy nova-scheduler python-novaclient
+		apt-get -y install nova-api nova-cert nova-conductor nova-consoleauth nova-novncproxy nova-scheduler python-novaclient
 		
 		[ -f /etc/nova/nova.conf ] && mv /etc/nova/nova.conf /etc/nova/nova.conf.old
 		cp Config/controller/nova.conf /etc/nova/nova.conf
-		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${THIS_MANAGEMENT_INTERFACE_IP}'/g' /etc/nova/nova.conf
-		sed -i 's/${NOVA_PASS}/'${NOVA_PASS}'/g' /etc/nova/nova.conf
-		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/nova/nova.conf
+		replace_para_in_file /etc/nova/nova.conf CONTROLLER_MANAGEMENT_INTERFACE_IP NOVA_PASS RABBIT_PASS
 		
 		su -s /bin/sh -c "nova-manage db sync" nova
 		
@@ -382,14 +404,11 @@ EOF
 		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "CONTROLLER_MANAGEMENT_INTERFACE_IP"
 	
 		# --- Install and configure the Compute hypervisor components ---
-		apt-get install nova-compute sysfsutils
+		apt-get -y install nova-compute sysfsutils
 		
 		[ -f /etc/nova/nova.conf ] && mv /etc/nova/nova.conf /etc/nova/nova.conf.old
 		cp Config/compute/nova.conf /etc/nova/nova.conf
-		sed -i 's/${THIS_MANAGEMENT_INTERFACE_IP}/'${THIS_MANAGEMENT_INTERFACE_IP}'/g' /etc/nova/nova.conf
-		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}'/g' /etc/nova/nova.conf
-		sed -i 's/${NOVA_PASS}/'${NOVA_PASS}'/g' /etc/nova/nova.conf
-		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/nova/nova.conf
+		replace_para_in_file /etc/nova/nova.conf THIS_MANAGEMENT_INTERFACE_IP CONTROLLER_MANAGEMENT_INTERFACE_IP NOVA_PASS RABBIT_PASS
 
 		# --- Finalize installation ---
 		export HARDWARE_ACCELERATION="$(egrep -c '(vmx|svm)' /proc/cpuinfo)"
@@ -412,6 +431,7 @@ EOF
 # Add networking components
 add_networking()
 {
+	print_info "Adding and configuring Network Service."
 	[ -z "${NEUTRON_PASS}" ] && print_error "NEUTRON_PASS hasn't been set." VAR_UNDEFINED "NEUTRON_PASS"
 	[ -z "${META_SECRET}" ] && print_error "META_SECRET hasn't been set." VAR_UNDEFINED "META_SECRET" 
 	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
@@ -441,24 +461,21 @@ EOF
 		network
 		
 		# --- Install the Networking components ---
-		apt-get install neutron-server neutron-plugin-ml2 python-neutronclient
+		apt-get -y install neutron-server neutron-plugin-ml2 python-neutronclient
 		
 		# --- Configure the Networking server component ---
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
 		cp Config/controller/neutron.conf /etc/neutron/neutron.conf
 #		sed -i 's/${THIS_MANAGEMENT_INTERFACE_IP}/'${THIS_MANAGEMENT_INTERFACE_IP}'/g' /etc/neutron/neutron.conf
 #		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}'/g' /etc/neutron/neutron.conf
-		sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/neutron.conf
-		sed -i 's/${NOVA_PASS}/'${NOVA_PASS}'/g' /etc/neutron/neutron.conf
-		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/neutron/neutron.conf
-	sed -i 's/${META_SECRET}/'${META_SECRET}'/g' /etc/neutron/neutron.conf
+		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS NOVA_PASS RABBIT_PASS META_SECRET
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
 		cp Config/controller/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
 	
 		
 		if [ -f /etc/nova/nova.conf ]; then
-			sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/nova/nova.conf
+			replace_para_in_file /etc/nova/nova.conf NEUTRON_PASS
 		else
 			print_error "/etc/nova/nova.conf not found."
 		fi
@@ -472,55 +489,53 @@ EOF
 	
 	# --- Configure Network Node ---
 	if [ "${INSTALL_TYPE}" == "Network" ]; then
-		
-	# --- Configure prerequisites ---
+			
+		# --- Configure prerequisites ---
 		if [ -f /etc/sysctl.conf ]; then
 			sed -i '/net.ipv4.ip_forward=/ c\net.ipv4.ip_forward=1' /etc/sysctl.conf
-		sed -i '/net.ipv4.conf.all.rp_filter=/ c\net.ipv4.conf.all.rp_filter=0' /etc/sysctl.conf
-		sed -i '/net.ipv4.conf.default.rp_filter=/ c\net.ipv4.conf.default.rp_filter=0' /etc/sysctl.conf
-	else
-		print_error "/etc/sysctl.conf not found"
-	fi
-	
-	sysctl -p
-	
-	# --- Install and configure the Networking components
-	apt-get install neutron-plugin-ml2 neutron-plugin-openvswitch-agent neutron-l3-agent neutron-dhcp-agent neutron-metadata-agent
-	
-	[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
+			sed -i '/net.ipv4.conf.all.rp_filter=/ c\net.ipv4.conf.all.rp_filter=0' /etc/sysctl.conf
+			sed -i '/net.ipv4.conf.default.rp_filter=/ c\net.ipv4.conf.default.rp_filter=0' /etc/sysctl.conf
+		else
+			print_error "/etc/sysctl.conf not found"
+		fi
+		
+		sysctl -p
+		
+		# --- Install and configure the Networking components
+		apt-get -y install neutron-plugin-ml2 neutron-plugin-openvswitch-agent neutron-l3-agent neutron-dhcp-agent neutron-metadata-agent
+		
+		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
 		cp Config/network/neutron.conf /etc/neutron/neutron.conf
-		sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/neutron.conf
-		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/neutron/neutron.conf
-	
-	[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
+		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS
+		
+		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
 		cp Config/network/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
-	sed -i 's/${THIS_TUNNEL_INTERFACE_IP}/'${THIS_TUNNEL_INTERFACE_IP}'/g' /etc/neutron/plugins/ml2/ml2_conf.ini
-	
-	[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
+		replace_para_in_file /etc/neutron/plugins/ml2/ml2_conf.ini THIS_TUNNEL_INTERFACE_IP
+		
+		[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
 		cp Config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
-	
-	[ -f /etc/neutron/dnsmasq-neutron.conf ] && mv /etc/neutron/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf.old
+		
+		[ -f /etc/neutron/dnsmasq-neutron.conf ] && mv /etc/neutron/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf.old
 		cp Config/network/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf
-	
-	pkill dnsmasq
-	
-	# --- Configure the metadata agent ---
-	[ -f /etc/neutron/metadata_agent.ini ] && mv /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini.old
+		
+		pkill dnsmasq
+		
+		# --- Configure the metadata agent ---
+		[ -f /etc/neutron/metadata_agent.ini ] && mv /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini.old
 		cp Config/network/metadata_agent.ini /etc/neutron/metadata_agent.ini
-	sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/metadata_agent.ini
-	sed -i 's/${META_SECRET}/'${META_SECRET}'/g' /etc/neutron/metadata_agent.ini
-	
-	service nova-api restart
-	
-	# --- Configure the Open vSwitch (OVS) service ---
-	service openvswitch-switch restart
-	ovs-vsctl add-br br-ex
-	ovs-vsctl add-port br-ex ${EXTERNAL_INTERFACE}
-	
-	service neutron-plugin-openvswitch-agent restart
-	service neutron-l3-agent restart
-	service neutron-dhcp-agent restart
-	service neutron-metadata-agent restart
+		replace_para_in_file /etc/neutron/metadata_agent.ini NEUTRON_PASS META_SECRET
+		
+		service nova-api restart
+		
+		# --- Configure the Open vSwitch (OVS) service ---
+		service openvswitch-switch restart
+		ovs-vsctl add-br br-ex
+		ovs-vsctl add-port br-ex ${EXTERNAL_INTERFACE}
+		
+		service neutron-plugin-openvswitch-agent restart
+		service neutron-l3-agent restart
+		service neutron-dhcp-agent restart
+		service neutron-metadata-agent restart
 	
 	fi
 	
@@ -530,21 +545,20 @@ EOF
 		sysctl -p
 		
 		# --- Install and configure networking components ---
-		apt-get install neutron-plugin-ml2 neutron-plugin-openvswitch-agent
+		apt-get -y install neutron-plugin-ml2 neutron-plugin-openvswitch-agent
 		
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
 		cp Config/compute/neutron.conf /etc/neutron/neutron.conf
-		sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/neutron/neutron.conf
-		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/neutron/neutron.conf
+		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
 		cp Config/compute/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
-		sed -i 's/${THIS_TUNNEL_INTERFACE_IP}/'${THIS_TUNNEL_INTERFACE_IP}'/g' /etc/neutron/plugins/ml2/ml2_conf.ini
+		replace_para_in_file /etc/neutron/plugins/ml2/ml2_conf.ini THIS_TUNNEL_INTERFACE_IP
 		
 		service openvswitch-switch restart
 		
 		if [ -f /etc/nova/nova.conf ]; then
-			sed -i 's/${NEUTRON_PASS}/'${NEUTRON_PASS}'/g' /etc/nova/nova.conf
+			replace_para_in_file /etc/nova/nova.conf NEUTRON_PASS
 		else
 			print_error "/etc/nova/nova.conf is missing."
 			return 1
@@ -561,6 +575,7 @@ EOF
 # Create initial network for OpenStack Network (Neutron)
 create_init_network()
 {
+	print_info "Initializing initial network."
 	! [ -f admin-openrc.sh ] && print_error "admin-openrc.sh's missing." && return 1
 
 	source admin-openrc.sh
@@ -604,7 +619,7 @@ create_init_network()
 # Add OpenStack Dashboard
 add_dashboard()
 {
-	apt-get install openstack-dashboard
+	apt-get -y install openstack-dashboard
 	if [ -f /etc/openstack-dashboard/local_settings.py ]; then
 		mv /etc/openstack-dashboard/local_settings.py /etc/openstack-dashboard/local_settings.py.old
 		cp Config/Controller/local_settings.py /etc/openstack-dashboard/local_settings.py
@@ -617,9 +632,46 @@ add_dashboard()
 	return 0
 }
 
+# Add OpenStack Block Storage service
+add_block_storage()
+{
+	print_info "Adding and configurating OpenStack Block Storage (Cinder)."
+	[ -z "${CINDER_PASS}" ] && print_error "CINDER_PASS hasn't been set." VAR_UNDEFINED CINDER_PASS
+	
+	if [ "${INSTALL_TYPE}" == "Controller" ]; then
+		# --- Configure prerequisites ---
+		mysql -u root -p${MYSQL_ROOT_PASS} << EOF
+CREATE DATABASE cinder;
+GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'localhost' IDENTIFIED BY '${CINDER_PASS}';
+GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'%' IDENTIFIED BY '${CINDER_PASS}';
+EOF
+		source admin-openrc.sh
+		openstack user create --password ${CINDER_PASS} cinder
+		openstack role add --project service --user cinder admin
+		openstack service create --name cinder --description "OpenStack Block Storage" volume
+		openstack service create --name cinderv2 --description "OpenStack Block Storage" volumev2
+		openstack endpoint create \
+		--publicurl http://controller:8776/v2/%\(tenant_id\)s \
+		--internalurl http://controller:8776/v2/%\(tenant_id\)s \
+		--adminurl http://controller:8776/v2/%\(tenant_id\)s \
+		--region RegionOne \
+		volume
+		openstack endpoint create \
+		--publicurl http://controller:8776/v2/%\(tenant_id\)s \
+		--internalurl http://controller:8776/v2/%\(tenant_id\)s \
+		--adminurl http://controller:8776/v2/%\(tenant_id\)s \
+		--region RegionOne \
+		volumev2
+		
+		# --- Install and configure Block Storage controller components ---
+		apt-get -y install cinder-api cinder-scheduler python-cinderclient
+		
+		
+	
 # Add OpenStack Telemetry Service (Ceilometer)
 add_ceilometer()
 {
+	print_info "Adding and configurating OpenStack Telemetry Service (Ceilometer)."
 	[ -z "${INSTALL_TYPE}" ] && print_error "Please define INSTALL_TYPE " 
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then 
 		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "CONTROLLER_MANAGEMENT_INTERFACE_IP"
@@ -627,11 +679,11 @@ add_ceilometer()
 		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
 		
 		# --- Configure prerequisites ---
-		apt-get install mongodb-server mongodb-clients python-pymongo
+		apt-get -y install mongodb-server mongodb-clients python-pymongo
 		
 		[ -f /etc/mongodb.conf ] && mv /etc/mongodb.conf /etc/mongodb.conf.old
 		cp Config/controller/mongodb.conf /etc/mongodb.conf
-		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}'/g' /etc/mongodb.conf
+		replace_para_in_file /etc/mongodb.conf CONTROLLER_MANAGEMENT_INTERFACE_IP
 		service mongodb stop
 		rm /var/lib/mongodb/journal/prealloc.*
 		service mongodb start
@@ -655,15 +707,13 @@ add_ceilometer()
 		metering
 		
 		# --- Install and configure the Telemetry module components ---
-		apt-get install ceilometer-api ceilometer-collector ceilometer-agent-central ceilometer-agent-notification ceilometer-alarm-evaluator ceilometer-alarm-notifier python-ceilometerclient
+		apt-get -y install ceilometer-api ceilometer-collector ceilometer-agent-central ceilometer-agent-notification ceilometer-alarm-evaluator ceilometer-alarm-notifier python-ceilometerclient
 		
 		export TELEMETRY_SECRET="$(openssl rand -hex 10)"
 		
 		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
 		cp Config/controller/ceilometer.conf /etc/ceilometer/ceilometer.conf
-		sed -i 's/${CEILOMETER_PASS}/'${CEILOMETER_PASS}'/g' /etc/ceilometer/ceilometer.conf
-		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/ceilometer/ceilometer.conf
-		sed -i 's/${TELEMETRY_SECRET}/'${TELEMETRY_SECRET}'/g' /etc/ceilometer/ceilometer.conf
+		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET
 
 		service ceilometer-agent-central restart
 		service ceilometer-agent-notification restart
@@ -693,12 +743,10 @@ add_ceilometer()
 			fi
 		fi
 		
-		apt-get install ceilometer-agent-compute
+		apt-get -y install ceilometer-agent-compute
 		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
 		cp Config/compute/ceilometer.conf /etc/ceilometer/ceilometer.conf
-		sed -i 's/${CEILOMETER_PASS}/'${CEILOMETER_PASS}'/g' /etc/ceilometer/ceilometer.conf
-		sed -i 's/${RABBIT_PASS}/'${RABBIT_PASS}'/g' /etc/ceilometer/ceilometer.conf
-		sed -i 's/${TELEMETRY_SECRET}/'${TELEMETRY_SECRET}'/g' /etc/ceilometer/ceilometer.conf
+		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET
 		
 		service ceilometer-agent-compute restart
 		service nova-compute restart
@@ -706,3 +754,20 @@ add_ceilometer()
 		
 	return 0
 }	
+
+# Download example image and add it to image list
+# Further detail is on Page 51 of "OpenStack Installation Guide for Ubuntu 14.04" 
+set_example_image()
+{
+	print_info "Downloading and adding cirros-0.3.4 to image lib."
+	echo "export OS_IMAGE_API_VERSION=2" | tee -a admin-openrc.sh demo-openrc.sh
+	source admin-openrc.sh
+	mkdir /tmp/images
+	wget -P /tmp/images http://download.cirros-cloud.net/0.3.4/cirros-0.3.4-x86_64-disk.img
+	glance image-create --name "cirros-0.3.4-x86_64" --file /tmp/images/cirros-0.3.4-x86_64-disk.img \
+	--disk-format qcow2 --container-format bare --visibility public --progress
+	glance image-list
+	rm -r /tmp/images
+	return 0;
+}
+
