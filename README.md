@@ -14,7 +14,7 @@ Controller Node: <code>bash controller.sh</code><p>
 Network Node: <code>bash network.sh</code><p>
 Compute Node: <code>bash compute.sh</code><p>
 
-<b>Notice:</b>
+<b>Notice:</b><p>
 The script is currently not suitable for applying multiple nodes on one computer!<p>
 
 ----------------------
