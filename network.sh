@@ -5,8 +5,8 @@ set -x
 export INSTALL_TYPE=Network
 
 # Install confirmation
-read -p "Are you sure to install OpenStack Network Node? [Y/N]"
-if [ "$YN" != "Y" && "$YN" != "y" ]; then
+read -p "Are you sure to install OpenStack Network Node? [Y/N] " YN
+if [ "$YN" != "Y" ] && [ "$YN" != "y" ]; then
 	echo "Aborted."
 	exit 1
 fi

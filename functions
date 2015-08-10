@@ -70,6 +70,12 @@ ${NETWORK_MANAGEMENT_INTERFACE_IP} network
 # Controller
 ${CONTROLLER_MANAGEMENT_INTERFACE_IP} controller
 EOF
+	if [ ${INSTALL_TYPE} == "Storage" ]; then
+		cat << EOF >> /etc/hosts
+\#${STORAGE_NODE_NAME}
+${THIS_MANAGEMENT_INTERFACE_IP} ${STORAGE_NODE_NAME}
+EOF
+	fi
 	return 0
 }
 
@@ -105,9 +111,16 @@ inst_sql()
 	print_info "Install and configuring MySQL - MariaDB."
 	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS" 
 	
-	debconf-set-selections <<< 'mariadb-server mysql-server/root_password password ${MYSQL_ROOT_PASS}'
-	debconf-set-selections <<< 'mariadb-server mysql-server/root_password_again password ${MYSQL_ROOT_PASS}'
+	apt-get -y install debconf-utils
+	debconf-set-selections << EOF
+mariadb-server mysql-server/root_password password ${MYSQL_ROOT_PASS}
+EOF
+	debconf-set-selections << EOF
+mariadb-server mysql-server/root_password_again password ${MYSQL_ROOT_PASS}
+EOF
+
 	apt-get -y install mariadb-server
+	echo PURGE | debconf-communicate mariadb-server mysql-server
 
 	[ -f /etc/mysql/conf.d/mysqld_openstack.cnf ] && mv /etc/mysql/conf.d/mysqld_openstack.cnf /etc/mysql/conf.d/mysqld_openstack.cnf.old
 	cat << EOF >> /etc/mysql/conf.d/mysqld_openstack.cnf
@@ -575,6 +588,7 @@ EOF
 # Create initial network for OpenStack Network (Neutron)
 create_init_network()
 {
+	[ -z "${CREATE_INIT_WITH_SCRIPT}" ] && print_info "User choose to configure initial network manually." &&return 0
 	print_info "Initializing initial network."
 	! [ -f admin-openrc.sh ] && print_error "admin-openrc.sh's missing." && return 1
 
@@ -583,11 +597,6 @@ create_init_network()
 	# --- Create external network ---
 	neutron net-create ext-net --router:external \
 	--provider:physical_network external --provider:network_type flat
-	
-	read -p "EXTERNAL_NETWORK_CIDR = (e.g. 203.0.113.0/24) " EXTERNAL_NETWORK_CIDR
-	read -p "FLOATING_IP_START = (e.g. 203.0.113.101) " FLOATING_IP_START
-	read -p "FLOATING_IP_END = (e.g. 203.0.113.200) " FLOATING_IP_END
-	read -p "EXTERNAL_NETWORK_GATEWAY = (e.g. 203.0.113.1) " EXTERNAL_NETWORK_GATEWAY
 	
 	neutron subnet-create ext-net ${EXTERNAL_NETWORK_CIDR} --name ext-subnet \
 	--allocation-pool start=${FLOATING_IP_START},end=${FLOATING_IP_END} \
@@ -603,10 +612,7 @@ create_init_network()
 	
 	neutron net-create demo-net
 	
-	read -p "TENANT_NETWORK_CIDR = (e.g. 192.168.1.0/24) " TENANT_NETWORK_CIDR
-	read -p "TENANT_NETWORK_GATEWAY = (e.g. 192.168.1.1) " TENANT_NETWORK_GATEWAY
-
-	neutron subnet-create demo-net TENANT_NETWORK_CIDR --name demo-subnet --gateway TENANT_NETWORK_GATEWAY
+	neutron subnet-create demo-net TENANT_NETWORK_CIDR --name demo-subnet --gateway ${TENANT_NETWORK_GATEWAY}
 	
 	# --- create a router on the tenant network and attach the external and tenant networks to it ---
 	neutron router-create demo-router
@@ -665,9 +671,25 @@ EOF
 		
 		# --- Install and configure Block Storage controller components ---
 		apt-get -y install cinder-api cinder-scheduler python-cinderclient
+		[ -f /etc/cinder/cinder.conf ] && mv /etc/cinder/cinder.conf /etc/cinder/cinder.conf.old
+		cp Config/controller/cinder.conf /etc/cinder/cinder.conf
+		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP
+		su -s /bin/sh -c "cinder-manage db sync" cinder
 		
-		
+		# --- Finalize Installation ---
+		service cinder-scheduler restart
+		service cinder-api restart
+		rm -f /var/lib/cinder/cinder.sqlite
+		return 0
+	fi
 	
+	if [ "${INSTALL_TYPE}" == "Storage" ]; then
+		
+	fi
+		
+	return 0
+}		
+
 # Add OpenStack Telemetry Service (Ceilometer)
 add_ceilometer()
 {
@@ -770,4 +792,3 @@ set_example_image()
 	rm -r /tmp/images
 	return 0;
 }
-
