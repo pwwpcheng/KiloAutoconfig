@@ -11,21 +11,23 @@ if [ "$YN" != "Y" ] && [ "$YN" != "y" ]; then
 	exit 1
 fi
 
-# define functions
-[ -e ${PWD}/functions ] || exit 1 
-. ${PWD}/functions
+if ! [ -z "${INSTALL_CORE}" ]; then
+	# define functions
+	[ -e ${PWD}/functions ] || exit 1 
+	. ${PWD}/functions
 
-# Import environment variables
-set_env
-set_hosts
+	# Import environment variables
+	set_env
+	set_hosts
 
-# Setup OpenStack Packages
-set_hosts
-inst_ntp
-inst_openstack
+	# Setup OpenStack Packages
+	set_hosts
+	inst_ntp
+	inst_openstack
 
-# Setup compute service as network node
-add_networking
+	# Setup compute service as network node
+	add_networking
+fi
 
 # Create a initial network
-
+create_init_network

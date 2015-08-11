@@ -16,11 +16,15 @@ fi
 source ${PWD}/export.env
 . ${PWD}/functions
 
-# Setup OpenStack Packages
-set_hosts
-inst_openstack
-set_ntp
+set_env
 
+# Install OpenStack core services
+if ! [ -z "${INSTALL_CORE}" ]; then
+	# Setup OpenStack Packages
+	set_hosts
+	inst_openstack
+	set_ntp
+fi
 # Add Block Storage Service
 add_block_storage
 

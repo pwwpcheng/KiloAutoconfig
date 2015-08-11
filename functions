@@ -7,14 +7,14 @@
 # After:   (In rep_file, the line changes to) PASS_1=aaa
 replace_para_in_file()
 {
-        set -x
-        CUR_FILE=$1
-        WASTE=""
-        for i in $*; do
-                [ -z ${WASTE} ] && WASTE="a" && continue
-                sed -i 's/\${'$i'}/'${!i}'/g' $CUR_FILE
-        done;
-        return 0;
+	CUR_FILE=$1
+	WASTE=""
+	for i in $*; do
+		[ -z ${WASTE} ] && WASTE="a" && continue
+		[ -z "${!i}" ] && print_error "$i has not been set." 
+		sed -i 's/\${'$i'}/'${!i}'/g' $CUR_FILE
+	done
+	return 0
 }
 
 #Print out errors to screen
@@ -22,10 +22,9 @@ print_error()
 {
 	echo "[ERROR] Error message: $1"
 	if [ "$2" == "VAR_UNDEFINED" ]; then
-		set_variant $3
 		return 0
 	else
-		exit 1;
+		exit 1
 	fi
 }
 
@@ -63,19 +62,8 @@ set_hosts()
 	[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED  CONTROLLER_MANAGEMENT_INTERFACE_IP
 	
 	cp /etc/hosts /etc/hosts.bkp
-	cat << EOF >> /etc/hosts
-# Network
-${NETWORK_MANAGEMENT_INTERFACE_IP} network
-
-# Controller
-${CONTROLLER_MANAGEMENT_INTERFACE_IP} controller
+	cat Config/hosts >> /etc/hosts
 EOF
-	if [ ${INSTALL_TYPE} == "Storage" ]; then
-		cat << EOF >> /etc/hosts
-\#${STORAGE_NODE_NAME}
-${THIS_MANAGEMENT_INTERFACE_IP} ${STORAGE_NODE_NAME}
-EOF
-	fi
 	return 0
 }
 
@@ -101,7 +89,7 @@ inst_openstack()
 	print_info "Install and configuring OpenStack Packages."
 	apt-get -y install ubuntu-cloud-keyring
 	echo "deb http://ubuntu-cloud.archive.canonical.com/ubuntu" "trusty-updates/kilo main" > /etc/apt/sources.list.d/cloudarchive-kilo.list
-	apt-get update && apt-get dist-upgrade
+	apt-get -y update && apt-get dist-upgrade
 	return 0
 }
 
@@ -588,9 +576,10 @@ EOF
 # Create initial network for OpenStack Network (Neutron)
 create_init_network()
 {
-	[ -z "${CREATE_INIT_WITH_SCRIPT}" ] && print_info "User choose to configure initial network manually." &&return 0
+	[ -z "${CREATE_INIT_WITH_SCRIPT}" ] && print_info "User choose to configure initial network manually." && return 0
 	print_info "Initializing initial network."
 	! [ -f admin-openrc.sh ] && print_error "admin-openrc.sh's missing." && return 1
+	[ -z "${EXTERNAL_NETWORK_CIDR}" ] && print_error "EXTERNAL_NETWORK_CIDR hasn't been set." VAR_UNDEFINED EXTERNAL_NETWORK_CIDR
 
 	source admin-openrc.sh
 	
@@ -612,7 +601,7 @@ create_init_network()
 	
 	neutron net-create demo-net
 	
-	neutron subnet-create demo-net TENANT_NETWORK_CIDR --name demo-subnet --gateway ${TENANT_NETWORK_GATEWAY}
+	neutron subnet-create demo-net ${TENANT_NETWORK_CIDR} --name demo-subnet --gateway ${TENANT_NETWORK_GATEWAY}
 	
 	# --- create a router on the tenant network and attach the external and tenant networks to it ---
 	neutron router-create demo-router
@@ -684,7 +673,34 @@ EOF
 	fi
 	
 	if [ "${INSTALL_TYPE}" == "Storage" ]; then
+		# --- Configure prerequisites ---
+		apt-get -y install qemu
+		apt-get -y install lvm2
 		
+		echo  "You need to edit \/etc\/lvm\/lvm.conf manually before continue installing." 
+		sleep 5
+		unset YN
+		while [ "$YN" != "Y" ] && [ "$YN" != "y" ] && [ "$YN" != "N" ] && [ "$YN" != "n" ]; do
+			read -p "Edit \/etc\/lvm\/lvm.conf NOW? [Y/N]: " -p YN
+		done
+		if [ "$YN" == "Y" ] || [ "$YN" == "y" ]; then
+			vi /etc/lvm/lvm.conf
+		else
+			echo "Don't forget to edit this file later."
+			sleep 2
+		fi
+		
+		# --- Install and configure Block Storage volume components ---
+		apt-get install cinder-volume python-mysqldb
+		
+		cp Config/storage/cinder.conf /etc/cinder/cinder.conf
+		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP
+		
+		# --- Finalize Installation ---
+		service tgt restart
+		service cinder-volume restart
+		rm -f /var/lib/cinder/cinder.sqlite
+		return 0
 	fi
 		
 	return 0
@@ -772,6 +788,10 @@ add_ceilometer()
 		
 		service ceilometer-agent-compute restart
 		service nova-compute restart
+	fi
+	
+	if [ "${INSTALL_TYPE}" == "Storage" ]; then 
+		print_info "Telemetry service is configured by default."
 	fi
 		
 	return 0

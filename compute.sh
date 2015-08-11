@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-# Install type includes: Controller | Network | Compute
+# Install type includes: Controller | Network | Compute | Storage
 export INSTALL_TYPE=Compute
 
 # Install confirmation
@@ -16,17 +16,24 @@ fi
 source ${PWD}/export.env
 . ${PWD}/functions
 
-# Setup OpenStack Packages
-set_hosts
-inst_openstack
-set_ntp
+set_env
 
-# Create environment scripts for further configurations
-create_env_scripts
+# Install OpenStack core services
+if ! [ -z "${INSTALL_CORE}" ]; then
+	# Setup OpenStack Packages
+	set_hosts
+	inst_openstack
+	set_ntp
 
-# Setup compute service as a compute node
-add_compute
-add_networking
+	# Create environment scripts for further configurations
+	create_env_scripts
+
+	# Setup compute service as a compute node
+	add_compute
+	add_networking
+fi
 
 # Add telemetry service(ceilometer) and serve as a monitored node
-add_ceilometer
+! [ -z "${INSTALL_CEILOMETER}" ] && add_ceilometer
+
+
