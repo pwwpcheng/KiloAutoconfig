@@ -19,9 +19,6 @@ set_env
 
 # Install OpenStack core services
 if ! [ -z "${INSTALL_CORE}" ]; then
-	# Import environment variables
-	set_hosts
-
 	# Setup OpenStack Packages
 	set_hosts
 	inst_ntp
@@ -46,8 +43,10 @@ if ! [ -z "${INSTALL_CORE}" ]; then
 fi
 
 # Add telemetry service(ceilometer) and serve as a monitor
-! [ -z "${INSTALL_CEILOMETER}" ] && add_ceilometer
+! [ -z "${INSTALL_TELEMETRY}" ] && add_telemetry
 
 # Add Block Storage Service
 ! [ -z "${INSTALL_BLOCK_STORAGE}" ] && add_block_storage
 
+# Add OpenStack Orchestration (Heat)
+! [ -z "${INSTALL_ORCHESTRATION}" ] && add_orchestration

@@ -11,26 +11,59 @@ replace_para_in_file()
 	WASTE=""
 	for i in $*; do
 		[ -z ${WASTE} ] && WASTE="a" && continue
-		[ -z "${!i}" ] && print_error "$i has not been set." 
+		if [ -z "${!i}" ]; then
+			print_error "$i has not been set." 
+			set_variant $i
+		fi
 		sed -i 's/\${'$i'}/'${!i}'/g' $CUR_FILE
 	done
 	return 0
 }
 
+# Check the existence of parameter. Call set_exist if not.
+check_existence()
+{
+	for i in $*; do
+		if [ -z "${!i}" ]; then
+			print_error "$i has not been set."
+			set_variant $i
+		fi
+	done
+	return 0
+}
+
+# Jump to last failed install position
+#skip_inst()
+#{
+#	[ "${INSTALL_TYPE}" == "Controller" ] && STEPS="SET_HOSTS INST_NTP INST_OPENSTACK INST_SQL INST_MSGQ "
+#
+#	return 0
+#}
+
 #Print out errors to screen
 print_error()
 {
 	echo "[ERROR] Error message: $1"
-	if [ "$2" == "VAR_UNDEFINED" ]; then
-		return 0
-	else
+	if [ "$2" == "FATAL" ]; then
 		exit 1
 	fi
+	return 0
 }
 
+# If a variant is urgently needed but not set, call this function to set it
 set_variant()
 {
 	echo "[INFO ] Now set variant $1."
+	input_1=aaa
+	input_2=bbb
+	read -p "$1 = " input_1
+	read -p "Input again to confirm: " input_2
+	while [ "${input_1}" != "${input_2}" ]; do 
+		print_error "Two inputs not match"
+		read -p "$1 = " input_1
+		read -p "Input again to confirm: " input_2
+	done
+	
 	read -p "$1=" VAR
 	export $1=${VAR}
 	echo "[INFO ] Set $1 to ${VAR}"
@@ -58,9 +91,6 @@ set_env()
 # Configure name resolution in /etc/hosts
 set_hosts()
 {
-	[ -z "${NETWORK_MANAGEMENT_INTERFACE_IP}" ] && print_error "NETWORK_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED  "NETWORK_MANAGEMENT_INTERFACE_IP"
-	[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED  CONTROLLER_MANAGEMENT_INTERFACE_IP
-	
 	cp /etc/hosts /etc/hosts.bkp
 	cat Config/hosts >> /etc/hosts
 EOF
@@ -70,7 +100,7 @@ EOF
 # Setup NTP
 inst_ntp()
 {
-	print_info "Install and configuring NTP."
+	print_info "Installing and configuring NTP."
 	apt-get -y install ntp
 	mv /etc/ntp.conf /etc/ntp.conf.old
 	cat << EOF >> /etc/ntp.conf
@@ -97,7 +127,7 @@ inst_openstack()
 inst_sql()
 {
 	print_info "Install and configuring MySQL - MariaDB."
-	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS" 
+	check_existence MYSQL_ROOT_PASS CONTROLLER_MANAGEMENT_INTERFACE_IP
 	
 	apt-get -y install debconf-utils
 	debconf-set-selections << EOF
@@ -140,7 +170,7 @@ EOF
 inst_msgq()
 {
 	print_info "Install and configuring RabbitMQ."
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS" 
+	check_existence RABBIT_PASS
 	
 	apt-get -y install rabbitmq-server
 	rabbitmqctl add_user openstack ${RABBIT_PASS}
@@ -152,12 +182,9 @@ inst_msgq()
 add_identity_service()
 {
 	print_info "Install and configuring Identity Service."
-	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS"
-	[ -z "${KEYSTONE_PASS}" ] && print_error "KEYSTONE_PASS hasn't been set." VAR_UNDEFINED "KEYSTONE_PASS"
-	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set." VAR_UNDEFINED "ADMIN_PASS" 
-	
-	[ -f /etc/init/keystone.override ] && mv /etc/init/keystone.override /etc/init/keystone.override.old
+	check_existence MYSQL_ROOT_PASS KEYSTONE_PASS ADMIN_PASS
 
+	[ -f /etc/init/keystone.override ] && mv /etc/init/keystone.override /etc/init/keystone.override.old
 
 	# --- Install and configure ---
 	mysql -uroot -p${MYSQL_ROOT_PASS} <<EOF
@@ -169,9 +196,6 @@ EOF
 	export ADMIN_TOKEN="$(openssl rand -hex 10)"
 	echo "manual" > /etc/init/keystone.override
 	apt-get -y install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
-#	sed -i '/admin_token = / c\admin_token = '${ADMIN_TOKEN} /etc/keystone/keystone.conf
-#	sed -i '/connection = / c\connection = mysql:\/\/keystone:'${KEYSTONE_PASS}'@controller\/keystone'
-#	sed -i '/\[memcache\]/,/^\[/ s/servers =.*/servers = localhost:11211/' /etc/keystone/keystone.conf
 	mv /etc/keystone/keystone.conf /etc/keystone/keystone.conf.old
 	cp Config/controller/keystone.conf /etc/keystone/keystone.conf
 	replace_para_in_file /etc/keystone/keystone.conf KEYSTONE_PASS ADMIN_TOKEN
@@ -264,7 +288,7 @@ EOF
 create_env_scripts()
 {
 	print_info "Creating environmental scripts"
-	[ -z "${ADMIN_PASS}" ] && print_error "ADMIN_PASS hasn't been set." VAR_UNDEFINED "ADMIN_PASS"
+	check_existence ADMIN_PASS
 
 	cat << EOF >> admin-openrc.sh
 export OS_PROJECT_DOMAIN_ID=default
@@ -305,9 +329,7 @@ EOF
 add_image_service()
 {
 	print_info "Adding OpenStack Image Service."
-	[ -z "${MYSQL_ROOT_PASS}" ] && print_error "MYSQL_ROOT_PASS hasn't been set." VAR_UNDEFINED "MYSQL_ROOT_PASS"
-	[ -z "${GLANCE_PASS}" ] && print_error "GLANCE_PASS hasn't been set." VAR_UNDEFINED "GLANCE_PASS"
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
+	check_existence MYSQL_ROOT_PASS GLANCE_PASS RABBIT_PASS
 	
 	mysql -uroot -p${MYSQL_ROOT_PASS} << EOF
 CREATE DATABASE glance;
@@ -352,11 +374,7 @@ EOF
 add_compute()
 {
 	print_info "Installing and configurating Compute Service."
-	[ -z "${INSTALL_TYPE}" ] && print_error "INSTALL_TYPE hasn't been set." VAR_UNDEFINED "INSTALL_TYPE"
-	[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set." VAR_UNDEFINED "NOVA_PASS" 
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
-	[ -z "${THIS_MANAGEMENT_INTERFACE_IP}" ] && print_error "THIS_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "THIS_MANAGEMENT_INTERFACE_IP"
-	
+	check_existence INSTALL_TYPE NOVA_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP
 
 	# --- Configurations for Controller Node ---
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then
@@ -401,8 +419,7 @@ EOF
 	
 	# --- Configurations for Compute Node ---
 	if [ "${INSTALL_TYPE}" == "Compute" ]; then
-	
-		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "CONTROLLER_MANAGEMENT_INTERFACE_IP"
+		check_existence CONTROLLER_MANAGEMENT_INTERFACE_IP
 	
 		# --- Install and configure the Compute hypervisor components ---
 		apt-get -y install nova-compute sysfsutils
@@ -433,14 +450,11 @@ EOF
 add_networking()
 {
 	print_info "Adding and configuring Network Service."
-	[ -z "${NEUTRON_PASS}" ] && print_error "NEUTRON_PASS hasn't been set." VAR_UNDEFINED "NEUTRON_PASS"
-	[ -z "${META_SECRET}" ] && print_error "META_SECRET hasn't been set." VAR_UNDEFINED "META_SECRET" 
-	[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
+	check_existence NEUTRON_PASS META_SECRET RABBIT_PASS
 	
 	# --- Configure controller node ---
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then
-
-		[ -z "${NOVA_PASS}" ] && print_error "NOVA_PASS hasn't been set." VAR_UNDEFINED "NOVA_PASS"
+		check_existence NOVA_PASS
 
 		# --- Configure prerequisites ---
 		mysql -uroot -p${MYSQL_ROOT_PASS} << EOF
@@ -467,8 +481,6 @@ EOF
 		# --- Configure the Networking server component ---
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
 		cp Config/controller/neutron.conf /etc/neutron/neutron.conf
-#		sed -i 's/${THIS_MANAGEMENT_INTERFACE_IP}/'${THIS_MANAGEMENT_INTERFACE_IP}'/g' /etc/neutron/neutron.conf
-#		sed -i 's/${CONTROLLER_MANAGEMENT_INTERFACE_IP}/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}'/g' /etc/neutron/neutron.conf
 		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS NOVA_PASS RABBIT_PASS META_SECRET
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
@@ -579,7 +591,7 @@ create_init_network()
 	[ -z "${CREATE_INIT_WITH_SCRIPT}" ] && print_info "User choose to configure initial network manually." && return 0
 	print_info "Initializing initial network."
 	! [ -f admin-openrc.sh ] && print_error "admin-openrc.sh's missing." && return 1
-	[ -z "${EXTERNAL_NETWORK_CIDR}" ] && print_error "EXTERNAL_NETWORK_CIDR hasn't been set." VAR_UNDEFINED EXTERNAL_NETWORK_CIDR
+	check_existence EXTERNAL_NETWORK_CIDR
 
 	source admin-openrc.sh
 	
@@ -631,7 +643,7 @@ add_dashboard()
 add_block_storage()
 {
 	print_info "Adding and configurating OpenStack Block Storage (Cinder)."
-	[ -z "${CINDER_PASS}" ] && print_error "CINDER_PASS hasn't been set." VAR_UNDEFINED CINDER_PASS
+	check_existence CINDER_PASS
 	
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then
 		# --- Configure prerequisites ---
@@ -704,17 +716,63 @@ EOF
 	fi
 		
 	return 0
-}		
+}
+
+# Add OpenStack Orchestration (Heat)
+add_orchestration()
+{
+	print_info "Adding and configurating OpenStack Orchestration Service (Heat)."
+	check_existence MYSQL_ROOT_PASS HEAT_PASS 
+	
+	# --- Configure prerequisites ---
+	mysql -u root -p${MYSQL_ROOT_PASS} << EOF
+	CREATE DATABASE heat;
+	GRANT ALL PRIVILEGES ON heat.* TO 'heat'@'localhost' IDENTIFIED BY '${HEAT_PASS}';
+GRANT ALL PRIVILEGES ON heat.* TO 'heat'@'%' IDENTIFIED BY '${HEAT_PASS}';
+EOF
+	source admin-openrc.sh
+	openstack user create --password ${HEAT_PASS} heat
+	openstack role add --project service --user heat admin
+	openstack role create heat_stack_owner
+	openstack role add --project demo --user demo heat_stack_owner
+	openstack role create heat_stack_user
+	openstack service create --name heat --description "Orchestration" orchestration
+	openstack service create --name heat-cfn --description "Orchestration" cloudformation
+	openstack endpoint create \
+	--publicurl http://controller:8004/v1/%\(tenant_id\)s \
+	--internalurl http://controller:8004/v1/%\(tenant_id\)s \
+	--adminurl http://controller:8004/v1/%\(tenant_id\)s \
+	--region RegionOne \
+	orchestration
+	
+	# --- Install and configure the Orchestration components ---
+	apt-get install heat-api heat-api-cfn heat-engine python-heatclient
+	cp Config/controller/heat.conf /etc/heat/heat.conf
+	replace_para_in_file /etc/heat/heat.conf HEAT_PASS RABBIT_PASS HEAT_DOMAIN_PASS
+	
+	heat-keystone-setup-domain \
+	--stack-user-domain-name heat_user_domain \
+	--stack-domain-admin heat_domain_admin \
+	--stack-domain-admin-password ${HEAT_DOMAIN_PASS}
+	
+	su -s /bin/sh -c "heat-manage db_sync" heat
+	
+	# --- Finalize Installation ---
+	service heat-api restart
+	service heat-api-cfn restart
+	service heat-engine restart
+	rm -f /var/lib/heat/heat.sqlite
+	
+	return 0
+}
 
 # Add OpenStack Telemetry Service (Ceilometer)
-add_ceilometer()
+add_telemetry()
 {
 	print_info "Adding and configurating OpenStack Telemetry Service (Ceilometer)."
-	[ -z "${INSTALL_TYPE}" ] && print_error "Please define INSTALL_TYPE " 
+	check_existence INSTALL_TYPE
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then 
-		[ -z "${CONTROLLER_MANAGEMENT_INTERFACE_IP}" ] && print_error "CONTROLLER_MANAGEMENT_INTERFACE_IP hasn't been set." VAR_UNDEFINED "CONTROLLER_MANAGEMENT_INTERFACE_IP"
-		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." VAR_UNDEFINED "CEILOMETER_PASS"
-		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
+		check_existence CONTROLLER_MANAGEMENT_INTERFACE_IP CEILOMETER_PASS RABBIT_PASS
 		
 		# --- Configure prerequisites ---
 		apt-get -y install mongodb-server mongodb-clients python-pymongo
@@ -762,8 +820,7 @@ add_ceilometer()
 	fi
 	
 	if [ "${INSTALL_TYPE}" == "Compute" ]; then 
-		[ -z "${CEILOMETER_PASS}" ] && print_error "CEILOMETER_PASS hasn't been set." VAR_UNDEFINED "CEILOMETER_PASS"
-		[ -z "${RABBIT_PASS}" ] && print_error "RABBIT_PASS hasn't been set." VAR_UNDEFINED "RABBIT_PASS"
+		check_existence CEILOMETER_PASS RABBIT_PASS
 	
 		if [ -z "$TELEMETRY_SECRET" ]; then
 			echo "Telemetry_secret not defined. You may lookup /etc/ceilometer/ceilometer.conf or define a new one."

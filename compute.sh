@@ -34,6 +34,6 @@ if ! [ -z "${INSTALL_CORE}" ]; then
 fi
 
 # Add telemetry service(ceilometer) and serve as a monitored node
-! [ -z "${INSTALL_CEILOMETER}" ] && add_ceilometer
+! [ -z "${INSTALL_TELEMETRY}" ] && add_telemetry
 
 

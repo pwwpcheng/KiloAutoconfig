@@ -25,6 +25,9 @@ if ! [ -z "${INSTALL_CORE}" ]; then
 	inst_openstack
 	set_ntp
 fi
+
 # Add Block Storage Service
 add_block_storage
 
+# Add telemetry service(ceilometer) and serve as a monitor
+! [ -z "${INSTALL_TELEMETRY}" ] && add_telemetry
