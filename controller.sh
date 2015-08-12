@@ -36,7 +36,7 @@ if ! [ -z "${INSTALL_CORE}" ]; then
 	# Setup compute service as controller node
 	add_compute
 	add_networking
-	create_init_network
+#	create_init_network
 	
 	# Add dashboard
 	add_dashboard

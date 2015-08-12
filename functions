@@ -9,6 +9,7 @@ replace_para_in_file()
 {
 	CUR_FILE=$1
 	WASTE=""
+	! [ -f $1 ] && print_error "$1 not exist!" FATAL
 	for i in $*; do
 		[ -z ${WASTE} ] && WASTE="a" && continue
 		if [ -z "${!i}" ]; then
@@ -92,7 +93,7 @@ set_env()
 set_hosts()
 {
 	cp /etc/hosts /etc/hosts.bkp
-	cat Config/hosts >> /etc/hosts
+	cat config/hosts >> /etc/hosts
 EOF
 	return 0
 }
@@ -117,9 +118,9 @@ EOF
 inst_openstack()
 {
 	print_info "Install and configuring OpenStack Packages."
-	apt-get -y install ubuntu-cloud-keyring
+	apt-get -y --force-yes install ubuntu-cloud-keyring
 	echo "deb http://ubuntu-cloud.archive.canonical.com/ubuntu" "trusty-updates/kilo main" > /etc/apt/sources.list.d/cloudarchive-kilo.list
-	apt-get -y update && apt-get dist-upgrade
+	apt-get -y --force-yes update && apt-get -y --force-yes dist-upgrade
 	return 0
 }
 
@@ -137,7 +138,7 @@ EOF
 mariadb-server mysql-server/root_password_again password ${MYSQL_ROOT_PASS}
 EOF
 
-	apt-get -y install mariadb-server
+	apt-get -y --force-yes install mariadb-server python-mysqldb
 	echo PURGE | debconf-communicate mariadb-server mysql-server
 
 	[ -f /etc/mysql/conf.d/mysqld_openstack.cnf ] && mv /etc/mysql/conf.d/mysqld_openstack.cnf /etc/mysql/conf.d/mysqld_openstack.cnf.old
@@ -172,7 +173,7 @@ inst_msgq()
 	print_info "Install and configuring RabbitMQ."
 	check_existence RABBIT_PASS
 	
-	apt-get -y install rabbitmq-server
+	apt-get -y --force-yes install rabbitmq-server
 	rabbitmqctl add_user openstack ${RABBIT_PASS}
 	rabbitmqctl set_permissions openstack ".*" ".*" ".*"
 	return 0
@@ -195,9 +196,9 @@ exit
 EOF
 	export ADMIN_TOKEN="$(openssl rand -hex 10)"
 	echo "manual" > /etc/init/keystone.override
-	apt-get -y install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
+	apt-get --force-yes install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
 	mv /etc/keystone/keystone.conf /etc/keystone/keystone.conf.old
-	cp Config/controller/keystone.conf /etc/keystone/keystone.conf
+	cp config/controller/keystone.conf /etc/keystone/keystone.conf
 	replace_para_in_file /etc/keystone/keystone.conf KEYSTONE_PASS ADMIN_TOKEN
 	su -s /bin/sh -c "keystone-manage db_sync" keystone
 	
@@ -289,6 +290,7 @@ create_env_scripts()
 {
 	print_info "Creating environmental scripts"
 	check_existence ADMIN_PASS
+	[ -f admin-openrc.sh ] && rm -f admin-openrc.sh
 
 	cat << EOF >> admin-openrc.sh
 export OS_PROJECT_DOMAIN_ID=default
@@ -351,13 +353,13 @@ EOF
 	image
 	
 	# --- Install and configure the Image service components ---
-	apt-get -y install glance python-glanceclient
+	apt-get -y --force-yes install glance python-glanceclient
 	[ -f /etc/glance/glance-api.conf ] && mv /etc/glance/glance-api.conf /etc/glance/glance-api.conf.old
-	cp Config/controller/glance-api.conf /etc/glance/glance-api.conf
+	cp config/controller/glance-api.conf /etc/glance/glance-api.conf
 	replace_para_in_file /etc/glance/glance-api.conf GLANCE_PASS RABBIT_PASS
 	
 	[ -f /etc/glance/glance-registry.conf ] && mv /etc/glance/glance-registry.conf /etc/glance/glance-registry.conf.old
-	cp Config/controller/glance-registry.conf /etc/glance/glance-registry.conf
+	cp config/controller/glance-registry.conf /etc/glance/glance-registry.conf
 	replace_para_in_file /etc/glance/glance-registry.conf GLANCE_PASS RABBIT_PASS
 	
 	su -s /bin/sh -c "glance-manage db_sync" glance
@@ -398,10 +400,10 @@ EOF
 		compute
 		
 		# --- Install and configure Compute controller components ---
-		apt-get -y install nova-api nova-cert nova-conductor nova-consoleauth nova-novncproxy nova-scheduler python-novaclient
+		apt-get -y --force-yes install nova-api nova-cert nova-conductor nova-consoleauth nova-novncproxy nova-scheduler python-novaclient
 		
 		[ -f /etc/nova/nova.conf ] && mv /etc/nova/nova.conf /etc/nova/nova.conf.old
-		cp Config/controller/nova.conf /etc/nova/nova.conf
+		cp config/controller/nova.conf /etc/nova/nova.conf
 		replace_para_in_file /etc/nova/nova.conf CONTROLLER_MANAGEMENT_INTERFACE_IP NOVA_PASS RABBIT_PASS
 		
 		su -s /bin/sh -c "nova-manage db sync" nova
@@ -422,10 +424,10 @@ EOF
 		check_existence CONTROLLER_MANAGEMENT_INTERFACE_IP
 	
 		# --- Install and configure the Compute hypervisor components ---
-		apt-get -y install nova-compute sysfsutils
+		apt-get -y --force-yes install nova-compute sysfsutils
 		
 		[ -f /etc/nova/nova.conf ] && mv /etc/nova/nova.conf /etc/nova/nova.conf.old
-		cp Config/compute/nova.conf /etc/nova/nova.conf
+		cp config/compute/nova.conf /etc/nova/nova.conf
 		replace_para_in_file /etc/nova/nova.conf THIS_MANAGEMENT_INTERFACE_IP CONTROLLER_MANAGEMENT_INTERFACE_IP NOVA_PASS RABBIT_PASS
 
 		# --- Finalize installation ---
@@ -476,15 +478,15 @@ EOF
 		network
 		
 		# --- Install the Networking components ---
-		apt-get -y install neutron-server neutron-plugin-ml2 python-neutronclient
+		apt-get -y --force-yes install neutron-server neutron-plugin-ml2 python-neutronclient
 		
 		# --- Configure the Networking server component ---
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
-		cp Config/controller/neutron.conf /etc/neutron/neutron.conf
+		cp config/controller/neutron.conf /etc/neutron/neutron.conf
 		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS NOVA_PASS RABBIT_PASS META_SECRET
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
-		cp Config/controller/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
+		cp config/controller/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
 	
 		
 		if [ -f /etc/nova/nova.conf ]; then
@@ -515,27 +517,27 @@ EOF
 		sysctl -p
 		
 		# --- Install and configure the Networking components
-		apt-get -y install neutron-plugin-ml2 neutron-plugin-openvswitch-agent neutron-l3-agent neutron-dhcp-agent neutron-metadata-agent
+		apt-get -y --force-yes install neutron-plugin-ml2 neutron-plugin-openvswitch-agent neutron-l3-agent neutron-dhcp-agent neutron-metadata-agent
 		
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
-		cp Config/network/neutron.conf /etc/neutron/neutron.conf
+		cp config/network/neutron.conf /etc/neutron/neutron.conf
 		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
-		cp Config/network/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
+		cp config/network/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
 		replace_para_in_file /etc/neutron/plugins/ml2/ml2_conf.ini THIS_TUNNEL_INTERFACE_IP
 		
 		[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
-		cp Config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
+		cp config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
 		
 		[ -f /etc/neutron/dnsmasq-neutron.conf ] && mv /etc/neutron/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf.old
-		cp Config/network/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf
+		cp config/network/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf
 		
 		pkill dnsmasq
 		
 		# --- Configure the metadata agent ---
 		[ -f /etc/neutron/metadata_agent.ini ] && mv /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini.old
-		cp Config/network/metadata_agent.ini /etc/neutron/metadata_agent.ini
+		cp config/network/metadata_agent.ini /etc/neutron/metadata_agent.ini
 		replace_para_in_file /etc/neutron/metadata_agent.ini NEUTRON_PASS META_SECRET
 		
 		service nova-api restart
@@ -554,18 +556,18 @@ EOF
 	
 	if [ "$INSTALL_TYPE" == "Compute" ]; then
 		[ -f /etc/sysctl.conf ] && mv /etc/sysctl.conf /etc/sysctl.conf.old
-		cp Config/compute/sysctl.conf /etc/sysctl.conf
+		cp config/compute/sysctl.conf /etc/sysctl.conf
 		sysctl -p
 		
 		# --- Install and configure networking components ---
-		apt-get -y install neutron-plugin-ml2 neutron-plugin-openvswitch-agent
+		apt-get -y --force-yes install neutron-plugin-ml2 neutron-plugin-openvswitch-agent
 		
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
-		cp Config/compute/neutron.conf /etc/neutron/neutron.conf
+		cp config/compute/neutron.conf /etc/neutron/neutron.conf
 		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
-		cp Config/compute/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
+		cp config/compute/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
 		replace_para_in_file /etc/neutron/plugins/ml2/ml2_conf.ini THIS_TUNNEL_INTERFACE_IP
 		
 		service openvswitch-switch restart
@@ -626,10 +628,10 @@ create_init_network()
 # Add OpenStack Dashboard
 add_dashboard()
 {
-	apt-get -y install openstack-dashboard
+	apt-get -y --force-yes install openstack-dashboard
 	if [ -f /etc/openstack-dashboard/local_settings.py ]; then
 		mv /etc/openstack-dashboard/local_settings.py /etc/openstack-dashboard/local_settings.py.old
-		cp Config/Controller/local_settings.py /etc/openstack-dashboard/local_settings.py
+		cp config/controller/local_settings.py /etc/openstack-dashboard/local_settings.py
 	else
 		print_error "OpenStack Dashboard setup failed."
 	fi
@@ -671,9 +673,9 @@ EOF
 		volumev2
 		
 		# --- Install and configure Block Storage controller components ---
-		apt-get -y install cinder-api cinder-scheduler python-cinderclient
+		apt-get -y --force-yes install cinder-api cinder-scheduler python-cinderclient
 		[ -f /etc/cinder/cinder.conf ] && mv /etc/cinder/cinder.conf /etc/cinder/cinder.conf.old
-		cp Config/controller/cinder.conf /etc/cinder/cinder.conf
+		cp config/controller/cinder.conf /etc/cinder/cinder.conf
 		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP
 		su -s /bin/sh -c "cinder-manage db sync" cinder
 		
@@ -705,7 +707,7 @@ EOF
 		# --- Install and configure Block Storage volume components ---
 		apt-get install cinder-volume python-mysqldb
 		
-		cp Config/storage/cinder.conf /etc/cinder/cinder.conf
+		cp config/storage/cinder.conf /etc/cinder/cinder.conf
 		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP
 		
 		# --- Finalize Installation ---
@@ -746,8 +748,8 @@ EOF
 	orchestration
 	
 	# --- Install and configure the Orchestration components ---
-	apt-get install heat-api heat-api-cfn heat-engine python-heatclient
-	cp Config/controller/heat.conf /etc/heat/heat.conf
+	apt-get -y --force-yes install heat-api heat-api-cfn heat-engine python-heatclient
+	cp config/controller/heat.conf /etc/heat/heat.conf
 	replace_para_in_file /etc/heat/heat.conf HEAT_PASS RABBIT_PASS HEAT_DOMAIN_PASS
 	
 	heat-keystone-setup-domain \
@@ -775,10 +777,10 @@ add_telemetry()
 		check_existence CONTROLLER_MANAGEMENT_INTERFACE_IP CEILOMETER_PASS RABBIT_PASS
 		
 		# --- Configure prerequisites ---
-		apt-get -y install mongodb-server mongodb-clients python-pymongo
+		apt-get -y --force-yes install mongodb-server mongodb-clients python-pymongo
 		
 		[ -f /etc/mongodb.conf ] && mv /etc/mongodb.conf /etc/mongodb.conf.old
-		cp Config/controller/mongodb.conf /etc/mongodb.conf
+		cp config/controller/mongodb.conf /etc/mongodb.conf
 		replace_para_in_file /etc/mongodb.conf CONTROLLER_MANAGEMENT_INTERFACE_IP
 		service mongodb stop
 		rm /var/lib/mongodb/journal/prealloc.*
@@ -803,12 +805,12 @@ add_telemetry()
 		metering
 		
 		# --- Install and configure the Telemetry module components ---
-		apt-get -y install ceilometer-api ceilometer-collector ceilometer-agent-central ceilometer-agent-notification ceilometer-alarm-evaluator ceilometer-alarm-notifier python-ceilometerclient
+		apt-get -y --force-yes install ceilometer-api ceilometer-collector ceilometer-agent-central ceilometer-agent-notification ceilometer-alarm-evaluator ceilometer-alarm-notifier python-ceilometerclient
 		
 		export TELEMETRY_SECRET="$(openssl rand -hex 10)"
 		
 		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
-		cp Config/controller/ceilometer.conf /etc/ceilometer/ceilometer.conf
+		cp config/controller/ceilometer.conf /etc/ceilometer/ceilometer.conf
 		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET
 
 		service ceilometer-agent-central restart
@@ -838,9 +840,9 @@ add_telemetry()
 			fi
 		fi
 		
-		apt-get -y install ceilometer-agent-compute
+		apt-get -y --force-yes install ceilometer-agent-compute
 		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
-		cp Config/compute/ceilometer.conf /etc/ceilometer/ceilometer.conf
+		cp config/compute/ceilometer.conf /etc/ceilometer/ceilometer.conf
 		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET
 		
 		service ceilometer-agent-compute restart
