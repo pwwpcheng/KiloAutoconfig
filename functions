@@ -17,6 +17,7 @@ replace_para_in_file()
 			set_variant $i
 		fi
 		sed -i 's/\${'$i'}/'${!i}'/g' $CUR_FILE
+		print_info "${CUR_FILE}: \${"$i"} has been set to "${!i}" ."
 	done
 	return 0
 }
@@ -196,7 +197,7 @@ exit
 EOF
 	export ADMIN_TOKEN="$(openssl rand -hex 10)"
 	echo "manual" > /etc/init/keystone.override
-	apt-get --force-yes install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
+	apt-get -y --force-yes install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
 	mv /etc/keystone/keystone.conf /etc/keystone/keystone.conf.old
 	cp config/controller/keystone.conf /etc/keystone/keystone.conf
 	replace_para_in_file /etc/keystone/keystone.conf KEYSTONE_PASS ADMIN_TOKEN
@@ -448,6 +449,48 @@ EOF
 	return 0
 }
 
+# Add network configurations on an existing compute node
+add_network_on_compute()
+{
+	print_info "Adding network node on existing compute node."
+	
+	check_existence NEUTRON_PASS META_SECRET EXTERNAL_INTERFACE
+	
+	cat >> /etc/sysctl.conf << EOF
+net.ipv4.ip_forward=1
+EOF
+	sysctl -p
+	apt-get -y --force-yes install neutron-plugin-ml2 neutron-plugin-openvswitch-agent neutron-l3-agent neutron-dhcp-agent neutron-metadata-agent
+	
+	sed -i '/\[[ml2_type_flat\]/,/^\[/s/.*flat_networks.*/flat_networks = external/' /etc/neutron/plugins/ml2/ml2_conf.ini	
+	sed -i '/\[ovs\]/a bridge_mappings = external:br-ex' /etc/neutron/plugins/ml2/ml2_conf.ini
+	
+	[ -f /etc/neutron/l3_agent.ini ] && mv /etc/neutron/l3_agent.ini /etc/neutron/l3_agent.ini.old
+	cp config/network/l3_agent.ini /etc/neutron/l3_agent.ini
+
+	[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
+	cp config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
+	
+	[ -f /etc/neutron/dnsmasq-neutron.conf ] && mv /etc/neutron/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf.old
+	cp config/network/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf
+	
+	# --- Configure the metadata agent ---
+	[ -f /etc/neutron/metadata_agent.ini ] && mv /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini.old
+	cp config/network/metadata_agent.ini /etc/neutron/metadata_agent.ini
+	replace_para_in_file /etc/neutron/metadata_agent.ini NEUTRON_PASS META_SECRET
+	
+	service openvswitch-switch restart
+	ovs-vsctl add-br br-ex
+	ovs-vsctl add-port br-ex ${EXTERNAL_INTERFACE}
+	
+	service neutron-plugin-openvswitch-agent restart
+	service neutron-l3-agent restart
+	service neutron-dhcp-agent restart
+	service neutron-metadata-agent restart
+	
+	return 0
+}
+
 # Add networking components
 add_networking()
 {
@@ -526,6 +569,9 @@ EOF
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
 		cp config/network/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
 		replace_para_in_file /etc/neutron/plugins/ml2/ml2_conf.ini THIS_TUNNEL_INTERFACE_IP
+		
+		[ -f /etc/neutron/l3_agent.ini ] && mv /etc/neutron/l3_agent.ini /etc/neutron/l3_agent.ini.old
+		cp config/network/l3_agent.ini /etc/neutron/l3_agent.ini
 		
 		[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
 		cp config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
@@ -772,7 +818,7 @@ EOF
 add_telemetry()
 {
 	print_info "Adding and configurating OpenStack Telemetry Service (Ceilometer)."
-	check_existence INSTALL_TYPE
+	check_existence INSTALL_TYPE CEILOMETER_PASS
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then 
 		check_existence CONTROLLER_MANAGEMENT_INTERFACE_IP CEILOMETER_PASS RABBIT_PASS
 		
@@ -787,11 +833,12 @@ add_telemetry()
 		service mongodb start
 		service mongodb restart
 		
-		mongo --host controller --eval '
-		db = db.getSiblingDB("ceilometer");
-		db.addUser({user: "ceilometer",
-		pwd: "${CEILOMETER_PASS}",
-		roles: [ "readWrite", "dbAdmin" ]})'
+		mongo --host controller << EOF
+db = db.getSiblingDB("ceilometer");
+db.addUser({user: "ceilometer",
+pwd: "${CEILOMETER_PASS}",
+roles: [ "readWrite", "dbAdmin" ]});
+EOF
 		
 		source admin-openrc.sh
 		openstack user create --password ${CEILOMETER_PASS} ceilometer
