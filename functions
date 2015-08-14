@@ -833,12 +833,11 @@ add_telemetry()
 		service mongodb start
 		service mongodb restart
 		
-		mongo --host controller << EOF
-db = db.getSiblingDB("ceilometer");
-db.addUser({user: "ceilometer",
-pwd: "${CEILOMETER_PASS}",
-roles: [ "readWrite", "dbAdmin" ]});
-EOF
+		mongo --host controller --eval "
+		db = db.getSiblingDB(\"ceilometer\");
+		db.addUser({user: \"ceilometer\",
+		pwd: \"${CEILOMETER_PASS}\",
+		roles: [ \"readWrite\", \"dbAdmin\" ]})"
 		
 		source admin-openrc.sh
 		openstack user create --password ${CEILOMETER_PASS} ceilometer
