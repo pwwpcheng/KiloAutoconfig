@@ -93,9 +93,24 @@ set_env()
 # Configure name resolution in /etc/hosts
 set_hosts()
 {
-	cp /etc/hosts /etc/hosts.bkp
-	cat config/hosts >> /etc/hosts
-EOF
+
+	if grep -rl 'controller' /etc/hosts
+	then
+        	sed -i 's/.* controller/'${CONTROLLER_MANAGEMENT_INTERFACE_IP}' controller/g' /etc/hosts
+	else
+	        echo ${CONTROLLER_MANAGEMENT_INTERFACE_IP}' controller' >> /etc/hosts
+	fi
+	
+	if grep -rl 'network' /etc/hosts
+	then
+	        sed -i 's/.* network/'${NETWORK_MANAGEMENT_INTERFACE_IP}' network/g' /etc/hosts
+	else
+        	echo ${NETWORK_MANAGEMENT_INTERFACE_IP}' network' >> /etc/hosts
+	fi
+
+#	cp /etc/hosts /etc/hosts.bkp
+#	cat config/hosts >> /etc/hosts
+#EOF
 	return 0
 }
 
@@ -200,7 +215,7 @@ EOF
 	apt-get -y --force-yes install keystone python-openstackclient apache2 libapache2-mod-wsgi memcached python-memcache
 	mv /etc/keystone/keystone.conf /etc/keystone/keystone.conf.old
 	cp config/controller/keystone.conf /etc/keystone/keystone.conf
-	replace_para_in_file /etc/keystone/keystone.conf KEYSTONE_PASS ADMIN_TOKEN
+	replace_para_in_file /etc/keystone/keystone.conf KEYSTONE_PASS ADMIN_TOKEN CONTROLLER_MANAGEMENT_INTERFACE_IP 
 	su -s /bin/sh -c "keystone-manage db_sync" keystone
 	
 	# --- Configure the Apache HTTP server ---
@@ -249,13 +264,13 @@ EOF
 	
 	# --- Create the service entity and API endpoint ---
 	export OS_TOKEN=${ADMIN_TOKEN}
-	export OS_URL=http://controller:35357/v2.0
+	export OS_URL=http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:35357/v2.0
 	openstack service create --name keystone --description "OpenStack Identity" identity
 
 	openstack endpoint create \
-	--publicurl http://controller:5000/v2.0 \
-	--internalurl http://controller:5000/v2.0 \
-	--adminurl http://controller:35357/v2.0 \
+	--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:5000/v2.0 \
+	--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:5000/v2.0 \
+	--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:35357/v2.0 \
 	--region RegionOne \
 	identity
 	
@@ -300,7 +315,7 @@ export OS_PROJECT_NAME=admin
 export OS_TENANT_NAME=admin
 export OS_USERNAME=admin
 export OS_PASSWORD=${ADMIN_PASS}
-export OS_AUTH_URL=http://controller:35357/v3
+export OS_AUTH_URL=http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:35357/v3
 EOF
 
 	if [ -z "${DEMO_PASS}" ];
@@ -321,7 +336,7 @@ export OS_PROJECT_NAME=demo
 export OS_TENANT_NAME=demo
 export OS_USERNAME=demo
 export OS_PASSWORD=${DEMO_PASS}
-export OS_AUTH_URL=http://controller:5000/v3
+export OS_AUTH_URL=http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:5000/v3
 EOF
 	fi
 	
@@ -347,9 +362,9 @@ EOF
 	openstack role add --project service --user glance admin
 	openstack service create --name glance --description "OpenStack Image service" image
 	openstack endpoint create \
-	--publicurl http://controller:9292 \
-	--internalurl http://controller:9292 \
-	--adminurl http://controller:9292 \
+	--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:9292 \
+	--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:9292 \
+	--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:9292 \
 	--region RegionOne \
 	image
 	
@@ -357,11 +372,11 @@ EOF
 	apt-get -y --force-yes install glance python-glanceclient
 	[ -f /etc/glance/glance-api.conf ] && mv /etc/glance/glance-api.conf /etc/glance/glance-api.conf.old
 	cp config/controller/glance-api.conf /etc/glance/glance-api.conf
-	replace_para_in_file /etc/glance/glance-api.conf GLANCE_PASS RABBIT_PASS
+	replace_para_in_file /etc/glance/glance-api.conf GLANCE_PASS RABBIT_PASS CONTROLLER_MANAGEMENT_INTERFACE_IP
 	
 	[ -f /etc/glance/glance-registry.conf ] && mv /etc/glance/glance-registry.conf /etc/glance/glance-registry.conf.old
 	cp config/controller/glance-registry.conf /etc/glance/glance-registry.conf
-	replace_para_in_file /etc/glance/glance-registry.conf GLANCE_PASS RABBIT_PASS
+	replace_para_in_file /etc/glance/glance-registry.conf GLANCE_PASS RABBIT_PASS CONTROLLER_MANAGEMENT_INTERFACE_IP
 	
 	su -s /bin/sh -c "glance-manage db_sync" glance
 	
@@ -394,9 +409,9 @@ EOF
 		openstack service create --name nova \
 		--description "OpenStack Compute" compute
 		openstack endpoint create \
-		--publicurl http://controller:8774/v2/%\(tenant_id\)s \
-		--internalurl http://controller:8774/v2/%\(tenant_id\)s \
-		--adminurl http://controller:8774/v2/%\(tenant_id\)s \
+		--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8774/v2/%\(tenant_id\)s \
+		--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8774/v2/%\(tenant_id\)s \
+		--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8774/v2/%\(tenant_id\)s \
 		--region RegionOne \
 		compute
 		
@@ -449,53 +464,11 @@ EOF
 	return 0
 }
 
-# Add network configurations on an existing compute node
-add_network_on_compute()
-{
-	print_info "Adding network node on existing compute node."
-	
-	check_existence NEUTRON_PASS META_SECRET EXTERNAL_INTERFACE
-	
-	cat >> /etc/sysctl.conf << EOF
-net.ipv4.ip_forward=1
-EOF
-	sysctl -p
-	apt-get -y --force-yes install neutron-plugin-ml2 neutron-plugin-openvswitch-agent neutron-l3-agent neutron-dhcp-agent neutron-metadata-agent
-	
-	sed -i '/\[[ml2_type_flat\]/,/^\[/s/.*flat_networks.*/flat_networks = external/' /etc/neutron/plugins/ml2/ml2_conf.ini	
-	sed -i '/\[ovs\]/a bridge_mappings = external:br-ex' /etc/neutron/plugins/ml2/ml2_conf.ini
-	
-	[ -f /etc/neutron/l3_agent.ini ] && mv /etc/neutron/l3_agent.ini /etc/neutron/l3_agent.ini.old
-	cp config/network/l3_agent.ini /etc/neutron/l3_agent.ini
-
-	[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
-	cp config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
-	
-	[ -f /etc/neutron/dnsmasq-neutron.conf ] && mv /etc/neutron/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf.old
-	cp config/network/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf
-	
-	# --- Configure the metadata agent ---
-	[ -f /etc/neutron/metadata_agent.ini ] && mv /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini.old
-	cp config/network/metadata_agent.ini /etc/neutron/metadata_agent.ini
-	replace_para_in_file /etc/neutron/metadata_agent.ini NEUTRON_PASS META_SECRET
-	
-	service openvswitch-switch restart
-	ovs-vsctl add-br br-ex
-	ovs-vsctl add-port br-ex ${EXTERNAL_INTERFACE}
-	
-	service neutron-plugin-openvswitch-agent restart
-	service neutron-l3-agent restart
-	service neutron-dhcp-agent restart
-	service neutron-metadata-agent restart
-	
-	return 0
-}
-
 # Add networking components
 add_networking()
 {
 	print_info "Adding and configuring Network Service."
-	check_existence NEUTRON_PASS META_SECRET RABBIT_PASS
+	check_existence NEUTRON_PASS METADATA_SECRET RABBIT_PASS
 	
 	# --- Configure controller node ---
 	if [ "${INSTALL_TYPE}" == "Controller" ]; then
@@ -514,9 +487,9 @@ EOF
 		openstack service create --name neutron \
 		--description "OpenStack Networking" network
 		openstack endpoint create \
-		--publicurl http://controller:9696 \
-		--adminurl http://controller:9696 \
-		--internalurl http://controller:9696 \
+		--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:9696 \
+		--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:9696 \
+		--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:9696 \
 		--region RegionOne \
 		network
 		
@@ -526,14 +499,14 @@ EOF
 		# --- Configure the Networking server component ---
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
 		cp config/controller/neutron.conf /etc/neutron/neutron.conf
-		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS NOVA_PASS RABBIT_PASS META_SECRET
+		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS NOVA_PASS RABBIT_PASS  CONTROLLER_MANAGEMENT_INTERFACE_IP
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
 		cp config/controller/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
 	
 		
 		if [ -f /etc/nova/nova.conf ]; then
-			replace_para_in_file /etc/nova/nova.conf NEUTRON_PASS
+			replace_para_in_file /etc/nova/nova.conf NEUTRON_PASS CONTROLLER_MANAGEMENT_INTERFACE_IP METADATA_SECRET
 		else
 			print_error "/etc/nova/nova.conf not found."
 		fi
@@ -564,27 +537,27 @@ EOF
 		
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
 		cp config/network/neutron.conf /etc/neutron/neutron.conf
-		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS
+		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS CONTROLLER_MANAGEMENT_INTERFACE_IP
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
 		cp config/network/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
 		replace_para_in_file /etc/neutron/plugins/ml2/ml2_conf.ini THIS_TUNNEL_INTERFACE_IP
-		
-		[ -f /etc/neutron/l3_agent.ini ] && mv /etc/neutron/l3_agent.ini /etc/neutron/l3_agent.ini.old
-		cp config/network/l3_agent.ini /etc/neutron/l3_agent.ini
 		
 		[ -f /etc/neutron/dhcp_agent.ini ] && mv /etc/neutron/dhcp_agent.ini /etc/neutron/dhcp_agent.ini.old
 		cp config/network/dhcp_agent.ini /etc/neutron/dhcp_agent.ini
 		
 		[ -f /etc/neutron/dnsmasq-neutron.conf ] && mv /etc/neutron/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf.old
 		cp config/network/dnsmasq-neutron.conf /etc/neutron/dnsmasq-neutron.conf
+	
+		[ -f /etc/neutron/l3_agent.ini ] && mv /etc/neutron/l3_agent.ini /etc/neutron/l3_agent.ini.old
+		cp config/network/l3_agent.ini /etc/neutron/l3_agent.ini
 		
 		pkill dnsmasq
 		
 		# --- Configure the metadata agent ---
 		[ -f /etc/neutron/metadata_agent.ini ] && mv /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini.old
 		cp config/network/metadata_agent.ini /etc/neutron/metadata_agent.ini
-		replace_para_in_file /etc/neutron/metadata_agent.ini NEUTRON_PASS META_SECRET
+		replace_para_in_file /etc/neutron/metadata_agent.ini NEUTRON_PASS METADATA_SECRET CONTROLLER_MANAGEMENT_INTERFACE_IP
 		
 		service nova-api restart
 		
@@ -610,7 +583,7 @@ EOF
 		
 		[ -f /etc/neutron/neutron.conf ] && mv /etc/neutron/neutron.conf /etc/neutron/neutron.conf.old
 		cp config/compute/neutron.conf /etc/neutron/neutron.conf
-		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS
+		replace_para_in_file /etc/neutron/neutron.conf NEUTRON_PASS RABBIT_PASS CONTROLLER_MANAGEMENT_INTERFACE_IP METADATA_SECRET 
 		
 		[ -f /etc/neutron/plugins/ml2/ml2_conf.ini ] && mv /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini.old
 		cp config/compute/ml2_conf.ini /etc/neutron/plugins/ml2/ml2_conf.ini
@@ -619,7 +592,7 @@ EOF
 		service openvswitch-switch restart
 		
 		if [ -f /etc/nova/nova.conf ]; then
-			replace_para_in_file /etc/nova/nova.conf NEUTRON_PASS
+			replace_para_in_file /etc/nova/nova.conf NEUTRON_PASS CONTROLLER_MANAGEMENT_INTERFACE_IP
 		else
 			print_error "/etc/nova/nova.conf is missing."
 			return 1
@@ -678,6 +651,7 @@ add_dashboard()
 	if [ -f /etc/openstack-dashboard/local_settings.py ]; then
 		mv /etc/openstack-dashboard/local_settings.py /etc/openstack-dashboard/local_settings.py.old
 		cp config/controller/local_settings.py /etc/openstack-dashboard/local_settings.py
+		replace_para_in_file /etc/openstack-dashboard/local_settings.py CONTROLLER_MANAGEMENT_INTERFACE_IP
 	else
 		print_error "OpenStack Dashboard setup failed."
 	fi
@@ -706,15 +680,15 @@ EOF
 		openstack service create --name cinder --description "OpenStack Block Storage" volume
 		openstack service create --name cinderv2 --description "OpenStack Block Storage" volumev2
 		openstack endpoint create \
-		--publicurl http://controller:8776/v2/%\(tenant_id\)s \
-		--internalurl http://controller:8776/v2/%\(tenant_id\)s \
-		--adminurl http://controller:8776/v2/%\(tenant_id\)s \
+		--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8776/v2/%\(tenant_id\)s \
+		--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8776/v2/%\(tenant_id\)s \
+		--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8776/v2/%\(tenant_id\)s \
 		--region RegionOne \
 		volume
 		openstack endpoint create \
-		--publicurl http://controller:8776/v2/%\(tenant_id\)s \
-		--internalurl http://controller:8776/v2/%\(tenant_id\)s \
-		--adminurl http://controller:8776/v2/%\(tenant_id\)s \
+		--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8776/v2/%\(tenant_id\)s \
+		--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8776/v2/%\(tenant_id\)s \
+		--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8776/v2/%\(tenant_id\)s \
 		--region RegionOne \
 		volumev2
 		
@@ -722,7 +696,7 @@ EOF
 		apt-get -y --force-yes install cinder-api cinder-scheduler python-cinderclient
 		[ -f /etc/cinder/cinder.conf ] && mv /etc/cinder/cinder.conf /etc/cinder/cinder.conf.old
 		cp config/controller/cinder.conf /etc/cinder/cinder.conf
-		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP
+		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP CONTROLLER_MANAGEMENT_INTERFACE_IP
 		su -s /bin/sh -c "cinder-manage db sync" cinder
 		
 		# --- Finalize Installation ---
@@ -754,7 +728,7 @@ EOF
 		apt-get install cinder-volume python-mysqldb
 		
 		cp config/storage/cinder.conf /etc/cinder/cinder.conf
-		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP
+		replace_para_in_file /etc/cinder/cinder.conf CINDER_PASS RABBIT_PASS THIS_MANAGEMENT_INTERFACE_IP CONTROLLER_MANAGEMENT_INTERFACE_IP
 		
 		# --- Finalize Installation ---
 		service tgt restart
@@ -787,16 +761,16 @@ EOF
 	openstack service create --name heat --description "Orchestration" orchestration
 	openstack service create --name heat-cfn --description "Orchestration" cloudformation
 	openstack endpoint create \
-	--publicurl http://controller:8004/v1/%\(tenant_id\)s \
-	--internalurl http://controller:8004/v1/%\(tenant_id\)s \
-	--adminurl http://controller:8004/v1/%\(tenant_id\)s \
+	--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8004/v1/%\(tenant_id\)s \
+	--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8004/v1/%\(tenant_id\)s \
+	--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8004/v1/%\(tenant_id\)s \
 	--region RegionOne \
 	orchestration
 	
 	# --- Install and configure the Orchestration components ---
 	apt-get -y --force-yes install heat-api heat-api-cfn heat-engine python-heatclient
 	cp config/controller/heat.conf /etc/heat/heat.conf
-	replace_para_in_file /etc/heat/heat.conf HEAT_PASS RABBIT_PASS HEAT_DOMAIN_PASS
+	replace_para_in_file /etc/heat/heat.conf HEAT_PASS RABBIT_PASS HEAT_DOMAIN_PASS 
 	
 	heat-keystone-setup-domain \
 	--stack-user-domain-name heat_user_domain \
@@ -830,23 +804,29 @@ add_telemetry()
 		replace_para_in_file /etc/mongodb.conf CONTROLLER_MANAGEMENT_INTERFACE_IP
 		service mongodb stop
 		rm /var/lib/mongodb/journal/prealloc.*
-		service mongodb start
 		service mongodb restart
-		
-		mongo --host controller --eval "
-		db = db.getSiblingDB(\"ceilometer\");
-		db.addUser({user: \"ceilometer\",
-		pwd: \"${CEILOMETER_PASS}\",
-		roles: [ \"readWrite\", \"dbAdmin\" ]})"
+	       
+                mongo --host controller --eval '
+db = db.getSiblingDB("admin");
+db.addUser({user: "admin",
+pwd: "'${CEILOMETER_PASS}'",
+roles: [ "userAdmin", "userAdminAnyDatabase", "dbAdmin", "dbAdminAnyDatabase", "readWriteAnyDatabase" ]})'
+
+ 
+                mongo --host controller --eval '
+db = db.getSiblingDB("ceilometer");
+db.addUser({user: "ceilometer",
+pwd: "'${CEILOMETER_PASS}'",
+roles: [ "readWrite", "dbAdmin" ]})'	
 		
 		source admin-openrc.sh
 		openstack user create --password ${CEILOMETER_PASS} ceilometer
 		openstack role add --project service --user ceilometer admin
 		openstack service create --name ceilometer --description "Telemetry" metering
 		openstack endpoint create \
-		--publicurl http://controller:8777 \
-		--internalurl http://controller:8777 \
-		--adminurl http://controller:8777 \
+		--publicurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8777 \
+		--internalurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8777 \
+		--adminurl http://${CONTROLLER_MANAGEMENT_INTERFACE_IP}:8777 \
 		--region RegionOne \
 		metering
 		
@@ -857,7 +837,7 @@ add_telemetry()
 		
 		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
 		cp config/controller/ceilometer.conf /etc/ceilometer/ceilometer.conf
-		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET
+		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET CONTROLLER_MANAGEMENT_INTERFACE_IP
 
 		service ceilometer-agent-central restart
 		service ceilometer-agent-notification restart
@@ -889,7 +869,7 @@ add_telemetry()
 		apt-get -y --force-yes install ceilometer-agent-compute
 		[ -f /etc/ceilometer/ceilometer.conf ] && mv /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf.old
 		cp config/compute/ceilometer.conf /etc/ceilometer/ceilometer.conf
-		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET
+		replace_para_in_file /etc/ceilometer/ceilometer.conf CEILOMETER_PASS RABBIT_PASS TELEMETRY_SECRET CONTROLLER_MANAGEMENT_INTERFACE_IP
 		
 		service ceilometer-agent-compute restart
 		service nova-compute restart

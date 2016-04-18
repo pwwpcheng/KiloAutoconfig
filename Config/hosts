@@ -5,7 +5,7 @@
 # Example:
 #------------------
 # # OpenStack Controller
-# 10.0.1.1 controller
+# 10.0.1.1 ${CONTROLLER_MANAGEMENT_INTERFACE_IP}
 # 
 # # OpenStack Network
 # 10.0.1.2 network
@@ -18,15 +18,9 @@
 # -----------------
 
 # OpenStack Controller
-192.168.18.135 controller
+#{CONTROLLER_MANAGEMENT_INTERFACE_IP} controller
 
 # OpenStack Network
-192.168.18.135 network
-
-# OpenStack Compute
-192.168.18.135 compute135
-
-# OpenStack Block Storage
-192.168.18.135 block135
+#${NETWORK_MANAGEMENT_INTERFACE_IP} network
 
 # --------------------------------------------------
